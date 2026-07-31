@@ -1,0 +1,289 @@
+use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
+use axum::response::IntoResponse;
+use futures::{sink::SinkExt, stream::StreamExt};
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use crate::clock::Clock;
+use crate::protocol::{ClientMessage, ServerMessage};
+use crate::room::RoomState;
+
+/// Bound on how many recent request IDs are remembered for deduplication.
+const DEDUP_CACHE_CAPACITY: usize = 256;
+
+/// Bound on the per-connection outbound channel. Generous enough to absorb
+/// bursts without ever blocking the room lock on a slow socket.
+const OUTBOUND_CHANNEL_CAPACITY: usize = 64;
+
+#[derive(Default)]
+struct SeenRequests {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl SeenRequests {
+    /// Returns true if `request_id` had already been recorded (i.e. this is
+    /// a duplicate that should not be applied again).
+    fn check_and_record(&mut self, request_id: &str) -> bool {
+        if self.set.contains(request_id) {
+            return true;
+        }
+        if self.order.len() >= DEDUP_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+        self.order.push_back(request_id.to_string());
+        self.set.insert(request_id.to_string());
+        false
+    }
+}
+
+pub struct AppState {
+    pub clock: Clock,
+    pub room: Arc<Mutex<RoomState>>,
+    pub events: broadcast::Sender<ServerMessage>,
+    pub schedule_lead_time_us: u64,
+    pub connection_count: Arc<AtomicUsize>,
+    seen_requests: Arc<Mutex<SeenRequests>>,
+}
+
+impl AppState {
+    pub fn new(schedule_lead_time: Duration) -> Arc<Self> {
+        let (events, _rx) = broadcast::channel(128);
+        Arc::new(Self {
+            clock: Clock::new(),
+            room: Arc::new(Mutex::new(RoomState::new())),
+            events,
+            schedule_lead_time_us: schedule_lead_time.as_micros() as u64,
+            connection_count: Arc::new(AtomicUsize::new(0)),
+            seen_requests: Arc::new(Mutex::new(SeenRequests::default())),
+        })
+    }
+}
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    let connection_id = Uuid::new_v4();
+    let connected = state.connection_count.fetch_add(1, Ordering::SeqCst) + 1;
+    info!(%connection_id, connected_client_count = connected, "client connected");
+
+    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CHANNEL_CAPACITY);
+    let mut broadcast_rx = state.events.subscribe();
+
+    // Writer task: owns the sink exclusively, forwarding both direct
+    // responses and broadcast events. Never awaits while holding the room
+    // lock - it doesn't touch the lock at all.
+    let writer = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                direct = outbound_rx.recv() => {
+                    match direct {
+                        Some(msg) => {
+                            if send(&mut ws_sink, &msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                broadcast_msg = broadcast_rx.recv() => {
+                    match broadcast_msg {
+                        Ok(msg) => {
+                            if send(&mut ws_sink, &msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(%connection_id, skipped, "connection lagged behind broadcast events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    });
+
+    send_welcome_and_snapshot(&outbound_tx, &state, connection_id).await;
+
+    while let Some(Ok(msg)) = ws_stream.next().await {
+        let Message::Text(text) = msg else {
+            continue;
+        };
+        handle_client_message(&text, &state, connection_id, &outbound_tx).await;
+    }
+
+    writer.abort();
+    let connected = state.connection_count.fetch_sub(1, Ordering::SeqCst) - 1;
+    info!(%connection_id, connected_client_count = connected, "client disconnected");
+}
+
+async fn send(sink: &mut (impl futures::Sink<Message> + Unpin), msg: &ServerMessage) -> Result<(), ()> {
+    let text = match serde_json::to_string(msg) {
+        Ok(text) => text,
+        Err(err) => {
+            warn!(%err, "failed to serialize outgoing message");
+            return Err(());
+        }
+    };
+    sink.send(Message::Text(text)).await.map_err(|_| ())
+}
+
+async fn send_welcome_and_snapshot(
+    outbound_tx: &mpsc::Sender<ServerMessage>,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    let welcome = ServerMessage::Welcome {
+        connection_id,
+        server_time_us: state.clock.now_us(),
+        schedule_lead_time_us: state.schedule_lead_time_us,
+    };
+    let _ = outbound_tx.send(welcome).await;
+
+    let snapshot = build_snapshot(state).await;
+    let _ = outbound_tx.send(snapshot).await;
+}
+
+async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
+    let room = state.room.lock().await;
+    ServerMessage::StateSnapshot {
+        server_time_us: state.clock.now_us(),
+        revision: room.revision,
+        transport: room.transport.to_dto(),
+    }
+}
+
+async fn handle_client_message(
+    text: &str,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+    outbound_tx: &mpsc::Sender<ServerMessage>,
+) {
+    let parsed: Result<ClientMessage, _> = serde_json::from_str(text);
+    let message = match parsed {
+        Ok(message) => message,
+        Err(err) => {
+            let _ = outbound_tx
+                .send(ServerMessage::Error {
+                    request_id: None,
+                    code: "invalid_message".to_string(),
+                    message: format!("Could not parse message: {err}"),
+                })
+                .await;
+            return;
+        }
+    };
+
+    if let Err(reason) = message.validate() {
+        let _ = outbound_tx
+            .send(ServerMessage::Error {
+                request_id: None,
+                code: "invalid_message".to_string(),
+                message: reason,
+            })
+            .await;
+        return;
+    }
+
+    match message {
+        ClientMessage::ClockRequest {
+            request_id,
+            client_send_time_ms,
+        } => {
+            let server_receive_time_us = state.clock.now_us();
+            let server_send_time_us = state.clock.now_us();
+            debug!(%request_id, %connection_id, server_receive_time_us, server_send_time_us, "clock request");
+            let _ = outbound_tx
+                .send(ServerMessage::ClockResponse {
+                    request_id,
+                    client_send_time_ms,
+                    server_receive_time_us,
+                    server_send_time_us,
+                })
+                .await;
+        }
+        ClientMessage::StateRequest { .. } => {
+            let snapshot = build_snapshot(state).await;
+            let _ = outbound_tx.send(snapshot).await;
+        }
+        ClientMessage::TransportRequest { request_id, action } => {
+            handle_transport_request(request_id, action, state, connection_id).await;
+        }
+    }
+}
+
+async fn handle_transport_request(
+    request_id: String,
+    action: crate::protocol::TransportAction,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate transport request ignored");
+            return;
+        }
+    }
+
+    let received_server_time_us = state.clock.now_us();
+    let event_data = {
+        let mut room = state.room.lock().await;
+        match action {
+            crate::protocol::TransportAction::Play => {
+                room.schedule_play(received_server_time_us, state.schedule_lead_time_us)
+            }
+            crate::protocol::TransportAction::Pause => {
+                room.schedule_pause(received_server_time_us, state.schedule_lead_time_us)
+            }
+            crate::protocol::TransportAction::Restart => {
+                room.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
+            }
+        }
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        action = ?action,
+        received_server_time_us,
+        effective_server_time_us = event_data.effective_server_time_us,
+        revision = event_data.revision,
+        position_us = event_data.position_us,
+        connected_client_count,
+        "transport request accepted"
+    );
+
+    let event = ServerMessage::TransportEvent {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        action,
+        effective_server_time_us: event_data.effective_server_time_us,
+        position_us: event_data.position_us,
+        playback_rate: event_data.playback_rate,
+    };
+
+    // Broadcasting can fail only when there are no subscribers left, which
+    // is harmless here since the sender's own writer task is dropping too.
+    let _ = state.events.send(event);
+}
