@@ -34,6 +34,12 @@
   <button id="state-btn" disabled>Refresh state</button>
   <button id="resync-btn" disabled>Resync clock</button>
   <p>
+    <label>
+      <input type="checkbox" id="nudge-enabled-checkbox" checked disabled />
+      Tempo nudge drift correction (synced room-wide)
+    </label>
+  </p>
+  <p>
     Status: <span id="transport-status" class="paused">unknown</span> —
     position: <span id="position-readout">0.000s</span>
   </p>
@@ -50,6 +56,9 @@
     <tr><th>last scheduled_server_time_us</th><td id="m-scheduled">-</td></tr>
     <tr><th>last estimated_actual_server_time_us</th><td id="m-actual">-</td></tr>
     <tr><th>last scheduling_error_us</th><td id="m-error">-</td></tr>
+    <tr><th>live playback drift (audio − model), us</th><td id="m-drift">-</td></tr>
+    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed">-</td></tr>
+    <tr><th>local rate nudge</th><td id="m-nudge">off</td></tr>
   </table>
 </section>
 
@@ -94,6 +103,19 @@ let audioCtx = null;
 let audioBuffer = null;
 let currentSource = null; // the AudioBufferSourceNode currently scheduled/playing
 
+// Where and when the *current* source actually starts sounding, in the
+// AudioContext's own clock - the ground truth for what's audible, as opposed
+// to `transport`'s server-time-derived model of where playback should be.
+// Comparing the two is what lets us measure real playback drift instead of
+// just JS-timer scheduling jitter.
+let currentSourceStart = null; // {contextTime, positionUs}
+
+// The actual playbackRate currently applied to currentSource. Normally equal
+// to transport.playback_rate (1.0), but a tempo nudge (see below) can pull it
+// slightly off that to correct local drift - a purely local correction the
+// server/model never knows about.
+let currentSourceRate = 1.0;
+
 function ensureAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -111,10 +133,30 @@ function performanceMsToAudioContextTime(targetPerformanceMs) {
   return anchorContextTime + (targetPerformanceMs - anchorPerformanceMs) / 1000;
 }
 
+/// The position the currently-sounding source is actually at right now,
+/// derived purely from the AudioContext's own sample clock - not from any
+/// server-time estimate. Null while nothing is actually sounding yet (source
+/// stopped, or its scheduled start time hasn't arrived).
+function currentAudioPositionUs() {
+  if (!currentSource || !currentSourceStart || !audioCtx) return null;
+  const elapsedSinceStartS = Math.max(0, audioCtx.currentTime - currentSourceStart.contextTime);
+  return currentSourceStart.positionUs + elapsedSinceStartS * 1e6 * currentSourceRate;
+}
+
 // ---- server clock estimation --------------------------------------------
 
-const clockSamples = []; // {rtt_us, offset_us}
-let bestSample = null;
+const INITIAL_SYNC_SAMPLE_COUNT = 8;
+const PERIODIC_RESYNC_SAMPLE_COUNT = 5;
+const PERIODIC_RESYNC_INTERVAL_MS = 30_000;
+
+// bestSample is refreshed once per resync round (see finishResyncRound) so
+// that offset/RTT track current network conditions instead of getting stuck
+// on whichever round happened to have the lowest RTT since the page loaded -
+// the whole point of periodic resync is to let later rounds correct earlier
+// ones, not just improve on an all-time-best.
+let bestSample = null; // {rtt_us, offset_us}
+let currentRoundSamples = [];
+let resyncIntervalId = null;
 
 function estimateServerTimeUs() {
   if (!bestSample) return null;
@@ -125,14 +167,24 @@ function recordClockSample(t0Ms, s1Us, s2Us, t3Ms) {
   const rttUs = (t3Ms - t0Ms) * 1000 - (s2Us - s1Us);
   const estimatedServerAtT3 = s2Us + rttUs / 2;
   const offsetUs = estimatedServerAtT3 - t3Ms * 1000;
-  const sample = { rtt_us: rttUs, offset_us: offsetUs };
-  clockSamples.push(sample);
-  if (!bestSample || sample.rtt_us < bestSample.rtt_us) {
-    bestSample = sample;
-    document.getElementById("m-offset").textContent = Math.round(bestSample.offset_us);
-    document.getElementById("m-rtt").textContent = Math.round(bestSample.rtt_us);
-  }
-  log(`clock sample: rtt=${Math.round(rttUs)}us offset=${Math.round(offsetUs)}us (best rtt=${Math.round(bestSample.rtt_us)}us)`);
+  currentRoundSamples.push({ rtt_us: rttUs, offset_us: offsetUs });
+  log(`clock sample: rtt=${Math.round(rttUs)}us offset=${Math.round(offsetUs)}us`);
+}
+
+function finishResyncRound() {
+  if (currentRoundSamples.length === 0) return;
+  const roundBest = currentRoundSamples.reduce((a, b) => (b.rtt_us < a.rtt_us ? b : a));
+  const previousOffsetUs = bestSample?.offset_us;
+  bestSample = roundBest;
+  currentRoundSamples = [];
+
+  document.getElementById("m-offset").textContent = Math.round(bestSample.offset_us);
+  document.getElementById("m-rtt").textContent = Math.round(bestSample.rtt_us);
+
+  const driftNote = previousOffsetUs === undefined
+    ? ""
+    : ` (drifted ${Math.round(bestSample.offset_us - previousOffsetUs)}us since last resync)`;
+  log(`clock resync complete: offset=${Math.round(bestSample.offset_us)}us, best rtt=${Math.round(bestSample.rtt_us)}us${driftNote}`);
 }
 
 const pendingClockRequests = new Map(); // request_id -> {t0Ms}
@@ -145,12 +197,32 @@ function sendClockRequest() {
 }
 
 function runClockSyncBurst(count) {
+  currentRoundSamples = [];
   let sent = 0;
   const interval = setInterval(() => {
     sendClockRequest();
     sent += 1;
-    if (sent >= count) clearInterval(interval);
+    if (sent >= count) {
+      clearInterval(interval);
+      // give the last request's response time to arrive before tallying up.
+      setTimeout(finishResyncRound, 500);
+    }
   }, 120);
+}
+
+function startPeriodicResync() {
+  stopPeriodicResync();
+  resyncIntervalId = setInterval(
+    () => runClockSyncBurst(PERIODIC_RESYNC_SAMPLE_COUNT),
+    PERIODIC_RESYNC_INTERVAL_MS,
+  );
+}
+
+function stopPeriodicResync() {
+  if (resyncIntervalId !== null) {
+    clearInterval(resyncIntervalId);
+    resyncIntervalId = null;
+  }
 }
 
 // ---- transport model -----------------------------------------------------
@@ -170,6 +242,78 @@ function setStatusUi() {
   statusEl.textContent = transport.playing ? "playing" : "paused";
   statusEl.className = transport.playing ? "playing" : "paused";
   document.getElementById("m-revision").textContent = lastAppliedRevision;
+}
+
+// ---- playback drift correction (tempo nudge) -----------------------------
+//
+// Sized from real observed numbers: three clients showed live playback drift
+// (audio - model) of roughly 35000±3000us, 1000±2000us and 0±2000us - so the
+// +/-2000-3000us band is frame-to-frame measurement noise (getOutputTimestamp
+// jitter, rAF scheduling), not real drift, and needs to be filtered out
+// before it's used to drive a correction. The engage threshold sits well
+// above that noise floor; the smoothing time constant flattens it out.
+const DRIFT_SMOOTHING_TIME_CONSTANT_S = 1.0;
+const NUDGE_ENGAGE_THRESHOLD_US = 10_000; // start correcting once smoothed drift exceeds this
+const NUDGE_DISENGAGE_THRESHOLD_US = 3_000; // stop once it falls back under this (hysteresis, avoids toggling at the edge)
+const NUDGE_RATE_DELTA = 0.002; // +/-0.2% playback rate: a DJ-style nudge, not a jump. Closes 35ms in ~17.5s.
+const NUDGE_RAMP_S = 0.3; // time to ramp the AudioParam in/out, avoids an audible click
+
+let smoothedDriftUs = null; // EMA of live drift; the nudge controller's input
+let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
+
+// Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed
+// (see websocket section) rather than a purely local UI toggle - every
+// connected client should agree on whether correction is active.
+let nudgeEnabled = true;
+
+/// Changes currentSource's actual playback rate, ramping smoothly rather than
+/// stepping, and rebases currentSourceStart so currentAudioPositionUs() stays
+/// correct across the rate change (see currentSourceRate above).
+function setSourceRate(newRate) {
+  if (!currentSource || !currentSourceStart || !audioCtx) return;
+  const positionAtRebaseUs = currentAudioPositionUs(); // must read before overwriting the rate/start below
+  const nowCtxTime = audioCtx.currentTime;
+  currentSourceStart = { contextTime: nowCtxTime, positionUs: positionAtRebaseUs };
+  currentSourceRate = newRate;
+
+  const param = currentSource.playbackRate;
+  param.cancelScheduledValues(nowCtxTime);
+  param.setValueAtTime(param.value, nowCtxTime);
+  param.linearRampToValueAtTime(newRate, nowCtxTime + NUDGE_RAMP_S);
+}
+
+function updateNudgeUi() {
+  const el = document.getElementById("m-nudge");
+  if (!nudgeEnabled) el.textContent = "disabled";
+  else if (nudgeDirection === 0) el.textContent = "off";
+  else if (nudgeDirection > 0) el.textContent = `speeding up (rate ${(1 + NUDGE_RATE_DELTA).toFixed(4)})`;
+  else el.textContent = `slowing down (rate ${(1 - NUDGE_RATE_DELTA).toFixed(4)})`;
+}
+
+function disengageNudge(reason) {
+  if (nudgeDirection === 0) return;
+  setSourceRate(1.0);
+  nudgeDirection = 0;
+  updateNudgeUi();
+  log(`nudge disengaged${reason ? `: ${reason}` : ""}`);
+}
+
+/// Bang-bang control with hysteresis: engage a small rate correction once
+/// smoothed drift clears the noise floor, hold it until drift is back near
+/// zero, then release. `audio ahead of model` -> slow down; `behind` -> speed up.
+function updateNudge(driftUs) {
+  if (!nudgeEnabled || driftUs === null) {
+    disengageNudge();
+    return;
+  }
+  if (nudgeDirection === 0 && Math.abs(driftUs) > NUDGE_ENGAGE_THRESHOLD_US) {
+    nudgeDirection = driftUs > 0 ? -1 : 1;
+    setSourceRate(1.0 + nudgeDirection * NUDGE_RATE_DELTA);
+    updateNudgeUi();
+    log(`nudge engaged: audio ${driftUs > 0 ? "ahead of" : "behind"} model by ${Math.round(Math.abs(driftUs))}us (smoothed), rate -> ${(1.0 + nudgeDirection * NUDGE_RATE_DELTA).toFixed(4)}`);
+  } else if (nudgeDirection !== 0 && Math.abs(driftUs) < NUDGE_DISENGAGE_THRESHOLD_US) {
+    disengageNudge("drift back within tolerance");
+  }
 }
 
 /// Schedules (or, if already due, immediately executes) a play/pause/restart
@@ -214,16 +358,36 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
+    source.onended = () => {
+      // Only clear if this is still the active source - a later play/restart
+      // may already have swapped `currentSource` out before this one ends.
+      if (currentSource === source) {
+        currentSource = null;
+        currentSourceStart = null;
+        nudgeDirection = 0;
+        updateNudgeUi();
+      }
+    };
     currentSource = source;
+    // Fresh segment: don't inherit a rate/nudge/smoothing state that belonged
+    // to whatever was playing before (e.g. right after a restart, drift and
+    // any active correction from the pre-restart segment are meaningless).
+    currentSourceRate = transport.playback_rate;
+    nudgeDirection = 0;
+    smoothedDriftUs = null;
+    updateNudgeUi();
 
     if (lateByUs > 0) {
-      const latePositionUs = positionUs + lateByUs;
+      const latePositionUs = Math.max(0, positionUs + lateByUs);
+      const startedAtContextTime = ctx.currentTime;
       log(`late ${action} event by ${Math.round(lateByUs)}us; starting immediately at ${(latePositionUs / 1e6).toFixed(3)}s`);
-      source.start(0, Math.max(0, latePositionUs) / 1e6);
+      source.start(0, latePositionUs / 1e6);
+      currentSourceStart = { contextTime: startedAtContextTime, positionUs: latePositionUs };
       measureFire();
     } else {
       const startAt = performanceMsToAudioContextTime(targetLocalMs);
       source.start(startAt, positionUs / 1e6);
+      currentSourceStart = { contextTime: startAt, positionUs };
       setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
     }
   } else {
@@ -241,11 +405,18 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
   }
 }
 
+function applyNudgeEnabled(enabled) {
+  nudgeEnabled = enabled;
+  document.getElementById("nudge-enabled-checkbox").checked = enabled;
+  updateNudgeUi();
+}
+
 function applySnapshot(msg) {
   transport = msg.transport;
   lastAppliedRevision = msg.revision;
+  applyNudgeEnabled(msg.nudge_enabled);
   setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing})`);
+  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled})`);
 }
 
 function applyTransportEvent(msg) {
@@ -268,6 +439,16 @@ function applyTransportEvent(msg) {
   scheduleAudioAction(msg.action, msg.effective_server_time_us, msg.position_us, willBePlaying);
 }
 
+function applyNudgeSettingEvent(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    log(`ignoring stale/duplicate nudge_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  applyNudgeEnabled(msg.enabled);
+  log(`nudge_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+}
+
 // ---- websocket -----------------------------------------------------------
 
 const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
@@ -278,17 +459,19 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
-    runClockSyncBurst(8);
+    runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
+    startPeriodicResync();
   });
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
+    stopPeriodicResync();
     setTimeout(connect, 1000);
   });
 
@@ -316,6 +499,9 @@ function connect() {
       }
       case "transport_event":
         applyTransportEvent(msg);
+        break;
+      case "nudge_setting_changed":
+        applyNudgeSettingEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]: ${msg.message}`);
@@ -351,11 +537,26 @@ document.getElementById("restart-btn").addEventListener("click", () => {
 document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });
-document.getElementById("resync-btn").addEventListener("click", () => runClockSyncBurst(8));
+document.getElementById("resync-btn").addEventListener("click", () => runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT));
+document.getElementById("nudge-enabled-checkbox").addEventListener("change", (e) => {
+  const desired = e.target.checked;
+  // This is a room-wide synced setting, not a local toggle: revert the
+  // browser's own optimistic checkbox flip and wait for the canonical
+  // nudge_setting_changed event (or someone else's request) to actually
+  // apply it - same "server is authoritative" pattern as play/pause/restart.
+  e.target.checked = nudgeEnabled;
+  ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, enabled: desired }));
+});
 
-// ---- live position readout --------------------------------------------
+// ---- live position readout & drift smoothing ------------------------------
+
+let lastTickTimeMs = null;
 
 function tick() {
+  const nowMs = performance.now();
+  const dtS = lastTickTimeMs === null ? 0 : (nowMs - lastTickTimeMs) / 1000;
+  lastTickTimeMs = nowMs;
+
   const nowServerUs = estimateServerTimeUs();
   if (nowServerUs !== null) {
     const positionUs = currentModelPositionUs(nowServerUs);
@@ -364,10 +565,39 @@ function tick() {
       document.getElementById("position-bar").max = audioBuffer.duration;
       document.getElementById("position-bar").value = positionUs / 1e6;
     }
+
+    const audioPositionUs = transport.playing ? currentAudioPositionUs() : null;
+    if (audioPositionUs === null) {
+      document.getElementById("m-drift").textContent = "-";
+      document.getElementById("m-drift-smoothed").textContent = "-";
+      smoothedDriftUs = null;
+      updateNudge(null);
+    } else {
+      const rawDriftUs = audioPositionUs - positionUs;
+      document.getElementById("m-drift").textContent = Math.round(rawDriftUs);
+
+      // Exponential moving average with a ~1s time constant - flattens the
+      // frame-to-frame measurement noise (see the nudge section above) while
+      // still tracking genuine drift trends within a few seconds.
+      const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
+      smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
+      document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
+      updateNudge(smoothedDriftUs);
+    }
   }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
+
+// A slower, logged trace of the smoothed drift + nudge status so it's
+// visible in the timestamped log panel too - useful when comparing several
+// open tabs after the fact, not just watching the live numbers.
+const PLAYBACK_DRIFT_LOG_INTERVAL_MS = 5_000;
+setInterval(() => {
+  if (smoothedDriftUs === null) return;
+  const nudgeText = nudgeDirection === 0 ? "no correction" : nudgeDirection > 0 ? "speeding up" : "slowing down";
+  log(`playback drift (smoothed): audio is ${smoothedDriftUs >= 0 ? "ahead of" : "behind"} model by ${Math.abs(Math.round(smoothedDriftUs))}us - ${nudgeText}`);
+}, PLAYBACK_DRIFT_LOG_INTERVAL_MS);
 
 connect();
 </script>

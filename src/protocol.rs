@@ -33,6 +33,13 @@ pub enum ClientMessage {
     StateRequest {
         request_id: String,
     },
+    /// Toggles the client-side tempo-nudge drift correction on or off,
+    /// synced room-wide like any other setting - not part of the
+    /// authoritative transport timeline, but shares its revision counter.
+    SetNudgeEnabled {
+        request_id: String,
+        enabled: bool,
+    },
 }
 
 impl ClientMessage {
@@ -42,6 +49,7 @@ impl ClientMessage {
             ClientMessage::ClockRequest { request_id, .. } => request_id,
             ClientMessage::TransportRequest { request_id, .. } => request_id,
             ClientMessage::StateRequest { request_id } => request_id,
+            ClientMessage::SetNudgeEnabled { request_id, .. } => request_id,
         };
         if request_id.trim().is_empty() {
             return Err("request_id must not be empty".to_string());
@@ -62,6 +70,7 @@ pub enum ServerMessage {
         server_time_us: u64,
         revision: u64,
         transport: TransportStateDto,
+        nudge_enabled: bool,
     },
     ClockResponse {
         request_id: String,
@@ -78,6 +87,13 @@ pub enum ServerMessage {
         effective_server_time_us: u64,
         position_us: u64,
         playback_rate: f64,
+    },
+    NudgeSettingChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        enabled: bool,
     },
     Error {
         request_id: Option<String>,
@@ -187,10 +203,40 @@ mod tests {
                 anchor_server_time_us: 47_000_000,
                 playback_rate: 1.0,
             },
+            nudge_enabled: true,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
         assert_eq!(json["transport"]["playing"], true);
+        assert_eq!(json["nudge_enabled"], true);
+    }
+
+    #[test]
+    fn deserializes_set_nudge_enabled() {
+        let json = r#"{"type":"set_nudge_enabled","request_id":"request-95","enabled":false}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetNudgeEnabled { request_id, enabled } => {
+                assert_eq!(request_id, "request-95");
+                assert!(!enabled);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_nudge_setting_changed() {
+        let msg = ServerMessage::NudgeSettingChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-95".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 3,
+            enabled: false,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "nudge_setting_changed");
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["revision"], 3);
     }
 
     #[test]

@@ -165,6 +165,7 @@ async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
         server_time_us: state.clock.now_us(),
         revision: room.revision,
         transport: room.transport.to_dto(),
+        nudge_enabled: room.nudge_enabled,
     }
 }
 
@@ -223,6 +224,9 @@ async fn handle_client_message(
         }
         ClientMessage::TransportRequest { request_id, action } => {
             handle_transport_request(request_id, action, state, connection_id).await;
+        }
+        ClientMessage::SetNudgeEnabled { request_id, enabled } => {
+            handle_set_nudge_enabled(request_id, enabled, state, connection_id).await;
         }
     }
 }
@@ -285,5 +289,47 @@ async fn handle_transport_request(
 
     // Broadcasting can fail only when there are no subscribers left, which
     // is harmless here since the sender's own writer task is dropping too.
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_nudge_enabled(
+    request_id: String,
+    enabled: bool,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_nudge_enabled request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_nudge_enabled(enabled)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        enabled,
+        revision = event_data.revision,
+        connected_client_count,
+        "nudge setting change accepted"
+    );
+
+    let event = ServerMessage::NudgeSettingChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        enabled: event_data.enabled,
+    };
+
     let _ = state.events.send(event);
 }

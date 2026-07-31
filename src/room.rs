@@ -56,9 +56,22 @@ pub struct TransportEventData {
     pub idempotent_replay: bool,
 }
 
+/// The outcome of toggling the room-wide tempo-nudge setting, ready to be
+/// turned into a canonical `ServerMessage::NudgeSettingChanged`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NudgeSettingEventData {
+    pub enabled: bool,
+    pub revision: u64,
+    pub idempotent_replay: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomState {
     pub transport: TransportState,
+    /// Whether clients should apply local tempo-nudge drift correction.
+    /// Not part of the transport timeline, but shares its revision counter
+    /// so clients can apply both kinds of event in a single ordered stream.
+    pub nudge_enabled: bool,
     pub revision: u64,
 }
 
@@ -66,12 +79,33 @@ impl RoomState {
     pub fn new() -> Self {
         Self {
             transport: TransportState::initial(),
+            nudge_enabled: true,
             revision: 0,
         }
     }
 
     pub fn current_position(&self, now_us: ServerTimeUs) -> u64 {
         self.transport.position_at(now_us)
+    }
+
+    /// Toggles the room-wide tempo-nudge setting. Idempotent: setting it to
+    /// its current value doesn't bump the revision or count as a fresh
+    /// change, mirroring `schedule_play`'s idempotent-replay convention.
+    pub fn set_nudge_enabled(&mut self, enabled: bool) -> NudgeSettingEventData {
+        if self.nudge_enabled == enabled {
+            return NudgeSettingEventData {
+                enabled,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        }
+        self.nudge_enabled = enabled;
+        self.revision += 1;
+        NudgeSettingEventData {
+            enabled,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
     }
 
     /// Schedules a play transition `lead_time_us` in the future. If playback
@@ -308,5 +342,49 @@ mod tests {
         room.schedule_restart(1_000_000, 150_000);
 
         assert_eq!(room.revision, revision_after_play + 1);
+    }
+
+    #[test]
+    fn nudge_enabled_defaults_to_true() {
+        let room = RoomState::new();
+        assert!(room.nudge_enabled);
+    }
+
+    #[test]
+    fn set_nudge_enabled_toggles_and_bumps_revision() {
+        let mut room = RoomState::new();
+
+        let event = room.set_nudge_enabled(false);
+
+        assert!(!event.enabled);
+        assert!(!event.idempotent_replay);
+        assert_eq!(event.revision, 1);
+        assert!(!room.nudge_enabled);
+        assert_eq!(room.revision, 1);
+    }
+
+    #[test]
+    fn set_nudge_enabled_is_idempotent_when_unchanged() {
+        let mut room = RoomState::new();
+        room.set_nudge_enabled(false);
+        let revision_after_first_toggle = room.revision;
+
+        let replay = room.set_nudge_enabled(false);
+
+        assert!(replay.idempotent_replay);
+        assert_eq!(room.revision, revision_after_first_toggle);
+    }
+
+    #[test]
+    fn nudge_setting_shares_revision_counter_with_transport() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        assert_eq!(room.revision, 1);
+
+        room.set_nudge_enabled(false);
+        assert_eq!(room.revision, 2);
+
+        room.schedule_pause(1_000_000, 150_000);
+        assert_eq!(room.revision, 3);
     }
 }

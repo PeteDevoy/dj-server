@@ -64,6 +64,7 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot_a["revision"], 0);
     assert_eq!(snapshot_a["transport"]["playing"], false);
+    assert_eq!(snapshot_a["nudge_enabled"], true);
 
     let _welcome_b = recv_until(&mut client_b, "welcome").await;
     let snapshot_b = recv_until(&mut client_b, "state_snapshot").await;
@@ -211,4 +212,54 @@ async fn restart_resets_position_but_keeps_playing_and_broadcasts_to_both_client
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot["transport"]["playing"], true);
     assert_eq!(snapshot["transport"]["anchor_position_us"], 0);
+}
+
+#[tokio::test]
+async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["nudge_enabled"], true);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A disables it; both clients must converge on the same event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off", "enabled": false}),
+    )
+    .await;
+
+    let event_a = recv_until(&mut client_a, "nudge_setting_changed").await;
+    let event_b = recv_until(&mut client_b, "nudge_setting_changed").await;
+
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["enabled"], false);
+    assert_eq!(event_a["revision"], 1);
+    assert_eq!(event_a["request_id"], "req-nudge-off");
+
+    // A fresh snapshot must reflect the change.
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-nudge-off"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["nudge_enabled"], false);
+    assert_eq!(snapshot["revision"], 1);
+
+    // Repeating the same value is idempotent: no new event, no revision bump.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off-again", "enabled": false}),
+    )
+    .await;
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-idempotent-toggle"}),
+    )
+    .await;
+    let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_after["revision"], 1);
 }
