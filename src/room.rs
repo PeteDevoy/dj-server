@@ -182,6 +182,46 @@ impl RoomState {
             idempotent_replay: false,
         }
     }
+
+    /// Schedules a playback-rate change `lead_time_us` in the future, without
+    /// changing whether it's playing or paused. Mirrors `schedule_pause`'s
+    /// convention: position is re-anchored at the effective time under the
+    /// OLD rate, then the anchor switches over to the new rate from there.
+    /// Idempotent if the rate is unchanged, like `schedule_play`.
+    pub fn schedule_playback_rate(
+        &mut self,
+        now_us: ServerTimeUs,
+        lead_time_us: u64,
+        new_rate: f64,
+    ) -> TransportEventData {
+        if (self.transport.playback_rate - new_rate).abs() < f64::EPSILON {
+            return TransportEventData {
+                action: TransportAction::SetTempo,
+                effective_server_time_us: self.transport.anchor_server_time_us,
+                position_us: self.transport.anchor_position_us,
+                playback_rate: self.transport.playback_rate,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        }
+
+        let effective_time_us = now_us + lead_time_us;
+        let position_us = self.transport.position_at(effective_time_us);
+
+        self.transport.anchor_position_us = position_us;
+        self.transport.anchor_server_time_us = effective_time_us;
+        self.transport.playback_rate = new_rate;
+        self.revision += 1;
+
+        TransportEventData {
+            action: TransportAction::SetTempo,
+            effective_server_time_us: effective_time_us,
+            position_us,
+            playback_rate: new_rate,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
 }
 
 impl Default for RoomState {
@@ -386,5 +426,100 @@ mod tests {
 
         room.schedule_pause(1_000_000, 150_000);
         assert_eq!(room.revision, 3);
+    }
+
+    #[test]
+    fn schedule_playback_rate_reanchors_position_while_playing() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+
+        let event = room.schedule_playback_rate(48_100_000, 150_000, 1.03);
+
+        assert_eq!(event.action, TransportAction::SetTempo);
+        assert_eq!(event.effective_server_time_us, 48_250_000);
+        // Playing at rate 1.0 since anchor_server_time_us = 150_000.
+        assert_eq!(event.position_us, 48_250_000 - 150_000);
+        assert_eq!(event.playback_rate, 1.03);
+        assert_eq!(room.transport.playback_rate, 1.03);
+        assert!(room.transport.playing);
+        assert_eq!(room.transport.anchor_position_us, event.position_us);
+        assert_eq!(room.transport.anchor_server_time_us, 48_250_000);
+    }
+
+    #[test]
+    fn schedule_playback_rate_while_paused_keeps_position_and_paused_state() {
+        let mut room = RoomState::new();
+
+        let event = room.schedule_playback_rate(0, 150_000, 0.94);
+
+        assert_eq!(event.position_us, 0);
+        assert_eq!(event.playback_rate, 0.94);
+        assert!(!room.transport.playing);
+        assert_eq!(room.transport.anchor_position_us, 0);
+    }
+
+    #[test]
+    fn schedule_playback_rate_is_idempotent_when_unchanged() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        let revision_after_play = room.revision;
+
+        let replay = room.schedule_playback_rate(1_000_000, 150_000, 1.0);
+
+        assert!(replay.idempotent_replay);
+        assert_eq!(room.revision, revision_after_play);
+    }
+
+    #[test]
+    fn schedule_playback_rate_increments_revision() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        let revision_after_play = room.revision;
+
+        room.schedule_playback_rate(1_000_000, 150_000, 1.06);
+
+        assert_eq!(room.revision, revision_after_play + 1);
+    }
+
+    #[test]
+    fn subsequent_play_after_tempo_change_carries_the_new_rate() {
+        let mut room = RoomState::new();
+        room.schedule_playback_rate(0, 150_000, 1.06);
+        room.schedule_pause(1_000_000, 150_000);
+
+        let event = room.schedule_play(2_000_000, 150_000);
+
+        assert_eq!(event.playback_rate, 1.06);
+    }
+
+    #[test]
+    fn schedule_playback_rate_with_zero_lead_time_applies_immediately() {
+        // The continuous tempo-sample stream applies with no lead time (see
+        // TEMPO_SAMPLE_LEAD_TIME_US in websocket.rs) - unlike play/pause/
+        // restart, each sample takes effect at `now_us` itself.
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+
+        let event = room.schedule_playback_rate(48_100_000, 0, 1.03);
+
+        assert_eq!(event.effective_server_time_us, 48_100_000);
+        assert_eq!(event.position_us, 48_100_000 - 150_000);
+        assert_eq!(room.transport.anchor_server_time_us, 48_100_000);
+    }
+
+    #[test]
+    fn successive_tempo_changes_each_get_a_strictly_increasing_revision() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        let after_play = room.revision;
+
+        let first = room.schedule_playback_rate(1_000_000, 0, 1.01);
+        let second = room.schedule_playback_rate(1_040_000, 0, 1.02);
+        let third = room.schedule_playback_rate(1_080_000, 0, 1.03);
+
+        assert_eq!(first.revision, after_play + 1);
+        assert_eq!(second.revision, after_play + 2);
+        assert_eq!(third.revision, after_play + 3);
+        assert_eq!(room.transport.playback_rate, 1.03);
     }
 }

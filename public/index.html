@@ -40,6 +40,13 @@
     </label>
   </p>
   <p>
+    <label>
+      Tempo (synced room-wide):
+      <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.005" value="1" disabled />
+      <span id="tempo-readout">100.0%</span>
+    </label>
+  </p>
+  <p>
     Status: <span id="transport-status" class="paused">unknown</span> —
     position: <span id="position-readout">0.000s</span>
   </p>
@@ -59,6 +66,11 @@
     <tr><th>live playback drift (audio − model), us</th><td id="m-drift">-</td></tr>
     <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed">-</td></tr>
     <tr><th>local rate nudge</th><td id="m-nudge">off</td></tr>
+    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay">-</td></tr>
+    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate">-</td></tr>
+    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval">-</td></tr>
+    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded">0</td></tr>
+    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt">-</td></tr>
   </table>
 </section>
 
@@ -242,6 +254,9 @@ function setStatusUi() {
   statusEl.textContent = transport.playing ? "playing" : "paused";
   statusEl.className = transport.playing ? "playing" : "paused";
   document.getElementById("m-revision").textContent = lastAppliedRevision;
+
+  document.getElementById("tempo-slider").value = transport.playback_rate;
+  document.getElementById("tempo-readout").textContent = `${(transport.playback_rate * 100).toFixed(1)}%`;
 }
 
 // ---- playback drift correction (tempo nudge) -----------------------------
@@ -268,31 +283,40 @@ let nudgeEnabled = true;
 
 /// Changes currentSource's actual playback rate, ramping smoothly rather than
 /// stepping, and rebases currentSourceStart so currentAudioPositionUs() stays
-/// correct across the rate change (see currentSourceRate above).
-function setSourceRate(newRate) {
+/// correct across the rate change (see currentSourceRate above). Defaults to
+/// ramping starting right now (used by the local, unsynced nudge corrector);
+/// pass `atContextTime` to hold the current rate until a future scheduled
+/// moment instead (used by synced tempo changes, so all clients change
+/// speed at approximately the same instant).
+function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
   if (!currentSource || !currentSourceStart || !audioCtx) return;
-  const positionAtRebaseUs = currentAudioPositionUs(); // must read before overwriting the rate/start below
-  const nowCtxTime = audioCtx.currentTime;
-  currentSourceStart = { contextTime: nowCtxTime, positionUs: positionAtRebaseUs };
+  const targetCtxTime = atContextTime ?? audioCtx.currentTime;
+  // Position at the target time, computed under the OLD rate, before we
+  // overwrite currentSourceStart/currentSourceRate below.
+  const elapsedToTargetS = Math.max(0, targetCtxTime - currentSourceStart.contextTime);
+  const positionAtTargetUs = currentSourceStart.positionUs + elapsedToTargetS * 1e6 * currentSourceRate;
+
+  currentSourceStart = { contextTime: targetCtxTime, positionUs: positionAtTargetUs };
   currentSourceRate = newRate;
 
   const param = currentSource.playbackRate;
-  param.cancelScheduledValues(nowCtxTime);
-  param.setValueAtTime(param.value, nowCtxTime);
-  param.linearRampToValueAtTime(newRate, nowCtxTime + NUDGE_RAMP_S);
+  const rampStartCtxTime = Math.max(audioCtx.currentTime, targetCtxTime);
+  param.cancelScheduledValues(audioCtx.currentTime);
+  param.setValueAtTime(param.value, audioCtx.currentTime); // pin current value, discard any pending automation
+  param.setValueAtTime(param.value, rampStartCtxTime); // hold until the target time (a no-op if that's "now")
+  param.linearRampToValueAtTime(newRate, rampStartCtxTime + rampDurationS);
 }
 
 function updateNudgeUi() {
   const el = document.getElementById("m-nudge");
   if (!nudgeEnabled) el.textContent = "disabled";
   else if (nudgeDirection === 0) el.textContent = "off";
-  else if (nudgeDirection > 0) el.textContent = `speeding up (rate ${(1 + NUDGE_RATE_DELTA).toFixed(4)})`;
-  else el.textContent = `slowing down (rate ${(1 - NUDGE_RATE_DELTA).toFixed(4)})`;
+  else el.textContent = `${nudgeDirection > 0 ? "speeding up" : "slowing down"} (rate ${currentSourceRate.toFixed(4)})`;
 }
 
 function disengageNudge(reason) {
   if (nudgeDirection === 0) return;
-  setSourceRate(1.0);
+  setSourceRate(transport.playback_rate);
   nudgeDirection = 0;
   updateNudgeUi();
   log(`nudge disengaged${reason ? `: ${reason}` : ""}`);
@@ -301,6 +325,8 @@ function disengageNudge(reason) {
 /// Bang-bang control with hysteresis: engage a small rate correction once
 /// smoothed drift clears the noise floor, hold it until drift is back near
 /// zero, then release. `audio ahead of model` -> slow down; `behind` -> speed up.
+/// The correction is always relative to transport.playback_rate (the
+/// synced tempo setting), not a hardcoded 1.0 - the two compose.
 function updateNudge(driftUs) {
   if (!nudgeEnabled || driftUs === null) {
     disengageNudge();
@@ -308,12 +334,135 @@ function updateNudge(driftUs) {
   }
   if (nudgeDirection === 0 && Math.abs(driftUs) > NUDGE_ENGAGE_THRESHOLD_US) {
     nudgeDirection = driftUs > 0 ? -1 : 1;
-    setSourceRate(1.0 + nudgeDirection * NUDGE_RATE_DELTA);
+    setSourceRate(transport.playback_rate * (1 + nudgeDirection * NUDGE_RATE_DELTA));
     updateNudgeUi();
-    log(`nudge engaged: audio ${driftUs > 0 ? "ahead of" : "behind"} model by ${Math.round(Math.abs(driftUs))}us (smoothed), rate -> ${(1.0 + nudgeDirection * NUDGE_RATE_DELTA).toFixed(4)}`);
+    log(`nudge engaged: audio ${driftUs > 0 ? "ahead of" : "behind"} model by ${Math.round(Math.abs(driftUs))}us (smoothed), rate -> ${currentSourceRate.toFixed(4)}`);
   } else if (nudgeDirection !== 0 && Math.abs(driftUs) < NUDGE_DISENGAGE_THRESHOLD_US) {
     disengageNudge("drift back within tolerance");
   }
+}
+
+// ---- tempo control ---------------------------------------------------------
+//
+// A synced +/-6% tempo slider (must match protocol::{MIN,MAX}_PLAYBACK_RATE
+// server-side), modeled on remote-entity interpolation in networked games:
+// local input is applied immediately and unbuffered; the value is streamed
+// out at a throttled rate plus a forced final sample on release; remote
+// clients render it from a small delayed/interpolated buffer instead of
+// snapping to each packet, so movement looks continuous even though it's
+// really a series of discrete, possibly-jittery updates. Audio reacts to
+// every accepted sample immediately via a short AudioParam ramp - separate
+// from the visual interpolation, which only affects the slider's rendering.
+const TEMPO_SAMPLE_INTERVAL_MS = 40; // throttle: how often to send while dragging (requested range: 25-50ms)
+const TEMPO_INTERPOLATION_DELAY_US = 90_000; // render this far behind estimated server time (requested range: 75-100ms)
+const TEMPO_SAMPLE_RAMP_S = 0.08; // audio ramp per sample - short enough to track a fast drag, long enough to avoid a click
+
+let isDraggingLocally = false; // true while THIS client owns the fader; local rendering bypasses the buffer entirely
+let tempoSampleBuffer = []; // [{serverTimeUs, value, revision}], ascending by serverTimeUs - remote render input only
+
+let lastTempoSampleSentAtMs = -Infinity;
+let tempoSamplesSentInWindow = 0; // reset every 1s by the diagnostic interval below
+let lastTempoSampleReceivedAtMs = null;
+let tempoDiscardedStaleCount = 0;
+let pendingLocalTempoRelease = null; // {value, sentAtMs} - sender-side round-trip diagnostic for the forced final send
+
+/// Throttled send: at most one message per TEMPO_SAMPLE_INTERVAL_MS unless
+/// `force` (used for the release/change-completion sample, which must go out
+/// immediately regardless of how recently we last sent).
+function sendTempoSample(rate, force) {
+  const nowMs = performance.now();
+  if (!force && nowMs - lastTempoSampleSentAtMs < TEMPO_SAMPLE_INTERVAL_MS) return;
+  lastTempoSampleSentAtMs = nowMs;
+  tempoSamplesSentInWindow++;
+  ws.send(JSON.stringify({ type: "set_tempo_request", request_id: `request-${randomId()}`, playback_rate: rate }));
+  if (force) pendingLocalTempoRelease = { value: rate, sentAtMs: nowMs };
+}
+
+/// Audio reacts to every accepted sample right away, ramped smoothly and
+/// composed with any active local nudge correction - independent of however
+/// delayed the *visual* slider rendering is.
+function scheduleTempoAudioRamp(baseRate) {
+  if (!currentSource || !currentSourceStart || !audioCtx) return;
+  const targetRate = baseRate * (nudgeDirection === 0 ? 1 : 1 + nudgeDirection * NUDGE_RATE_DELTA);
+  setSourceRate(targetRate, undefined, TEMPO_SAMPLE_RAMP_S);
+}
+
+/// Applies an accepted tempo sample: updates the authoritative model and
+/// audio immediately (both react in real time), but only *queues* the value
+/// for the delayed/interpolated visual render - see renderTempoFader().
+function applyTempoSample(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    tempoDiscardedStaleCount++;
+    document.getElementById("m-tempo-discarded").textContent = tempoDiscardedStaleCount;
+    log(`discarded stale tempo sample (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  document.getElementById("m-revision").textContent = lastAppliedRevision;
+
+  const nowMs = performance.now();
+  if (lastTempoSampleReceivedAtMs !== null) {
+    document.getElementById("m-tempo-interval").textContent = (nowMs - lastTempoSampleReceivedAtMs).toFixed(1);
+  }
+  lastTempoSampleReceivedAtMs = nowMs;
+
+  transport = { ...transport, playback_rate: msg.playback_rate, anchor_position_us: msg.position_us, anchor_server_time_us: msg.effective_server_time_us };
+  tempoSampleBuffer.push({ serverTimeUs: msg.effective_server_time_us, value: msg.playback_rate, revision: msg.revision });
+  scheduleTempoAudioRamp(msg.playback_rate);
+
+  if (msg.origin_connection_id === connectionId && pendingLocalTempoRelease && Math.abs(msg.playback_rate - pendingLocalTempoRelease.value) < 1e-9) {
+    const roundTripMs = nowMs - pendingLocalTempoRelease.sentAtMs;
+    document.getElementById("m-tempo-release-rtt").textContent = roundTripMs.toFixed(1);
+    log(`tempo release round-trip: ${roundTripMs.toFixed(1)}ms`);
+    pendingLocalTempoRelease = null;
+  }
+}
+
+/// Drops buffered samples we'll never need again - anything before the most
+/// recent one at or before `renderTimeUs`, since render time only moves
+/// forward. Keeps the buffer small (typically 2-3 entries at these rates).
+function trimTempoSampleBuffer(renderTimeUs) {
+  let cut = 0;
+  for (let i = 0; i < tempoSampleBuffer.length - 1; i++) {
+    if (tempoSampleBuffer[i + 1].serverTimeUs <= renderTimeUs) cut = i + 1;
+    else break;
+  }
+  if (cut > 0) tempoSampleBuffer.splice(0, cut);
+}
+
+/// Renders the remote tempo fader from the interpolation buffer: finds the
+/// two samples surrounding `renderTimeUs` and linearly interpolates between
+/// them. Falls back to holding the nearest known value when there's no pair
+/// to interpolate between yet (requirement: hold, don't jump/freeze-then-snap).
+function renderTempoFader() {
+  if (isDraggingLocally) return; // local input owns the DOM value while dragging
+  const nowServerUs = estimateServerTimeUs();
+  if (nowServerUs === null) return;
+  const renderTimeUs = nowServerUs - TEMPO_INTERPOLATION_DELAY_US;
+
+  let prev = null;
+  let next = null;
+  for (const sample of tempoSampleBuffer) {
+    if (sample.serverTimeUs <= renderTimeUs) prev = sample;
+    else { next = sample; break; }
+  }
+
+  let displayValue;
+  if (prev && next) {
+    const span = next.serverTimeUs - prev.serverTimeUs;
+    const frac = span > 0 ? Math.min(1, Math.max(0, (renderTimeUs - prev.serverTimeUs) / span)) : 1;
+    displayValue = prev.value + (next.value - prev.value) * frac;
+  } else if (prev) {
+    displayValue = prev.value; // no newer sample yet - hold rather than jump
+  } else if (next) {
+    displayValue = next.value; // cold start: render time is before our earliest sample
+  } else {
+    return; // nothing buffered at all yet
+  }
+
+  document.getElementById("tempo-slider").value = displayValue;
+  document.getElementById("tempo-readout").textContent = `${(displayValue * 100).toFixed(1)}%`;
+  trimTempoSampleBuffer(renderTimeUs);
 }
 
 /// Schedules (or, if already due, immediately executes) a play/pause/restart
@@ -415,6 +564,10 @@ function applySnapshot(msg) {
   transport = msg.transport;
   lastAppliedRevision = msg.revision;
   applyNudgeEnabled(msg.nudge_enabled);
+  // A reconnect starts a fresh timeline - any buffered tempo samples belong
+  // to a session that no longer exists, so drop them rather than let stale
+  // pre-reconnect data leak into a post-reconnect interpolated render.
+  tempoSampleBuffer = [];
   setStatusUi();
   log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled})`);
 }
@@ -425,9 +578,12 @@ function applyTransportEvent(msg) {
     return;
   }
   lastAppliedRevision = msg.revision;
-  // "restart" resets the playhead without changing whether it's playing or
-  // paused, so it keeps whatever the model already had for that flag.
-  const willBePlaying = msg.action === "restart" ? transport.playing : msg.action === "play";
+  // "restart" doesn't change whether it's playing or paused, so it keeps
+  // whatever the model already had for that flag. ("set_tempo" also
+  // preserves it, but that action is routed to applyTempoSample instead,
+  // never here - see the websocket message switch.)
+  const preservesPlayingState = msg.action === "restart";
+  const willBePlaying = preservesPlayingState ? transport.playing : msg.action === "play";
   transport = {
     playing: willBePlaying,
     anchor_position_us: msg.position_us,
@@ -459,7 +615,7 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider"]) {
       document.getElementById(btn).disabled = false;
     }
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
@@ -468,7 +624,7 @@ function connect() {
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -498,13 +654,14 @@ function connect() {
         break;
       }
       case "transport_event":
-        applyTransportEvent(msg);
+        if (msg.action === "set_tempo") applyTempoSample(msg);
+        else applyTransportEvent(msg);
         break;
       case "nudge_setting_changed":
         applyNudgeSettingEvent(msg);
         break;
       case "error":
-        log(`server error [${msg.code}]: ${msg.message}`);
+        log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
         break;
       default:
         log(`unhandled message type: ${msg.type}`);
@@ -547,6 +704,30 @@ document.getElementById("nudge-enabled-checkbox").addEventListener("change", (e)
   e.target.checked = nudgeEnabled;
   ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, enabled: desired }));
 });
+{
+  const tempoSliderEl = document.getElementById("tempo-slider");
+
+  // While *we* are the one moving the fader, our own DOM value is the
+  // immediate source of truth - the render loop skips it entirely (see
+  // isDraggingLocally in renderTempoFader). pointerdown/pointerup bracket
+  // the interaction; "change" is the authoritative completion signal.
+  tempoSliderEl.addEventListener("pointerdown", () => { isDraggingLocally = true; });
+  tempoSliderEl.addEventListener("pointerup", () => { isDraggingLocally = false; });
+  tempoSliderEl.addEventListener("pointercancel", () => { isDraggingLocally = false; });
+
+  tempoSliderEl.addEventListener("input", (e) => {
+    const rate = parseFloat(e.target.value);
+    document.getElementById("tempo-readout").textContent = `${(rate * 100).toFixed(1)}%`;
+    sendTempoSample(rate, false); // throttled - fine to call on every event
+  });
+
+  tempoSliderEl.addEventListener("change", (e) => {
+    // Fires on release / completion (including each discrete keyboard step).
+    // Always send the settled value right away, bypassing the throttle.
+    sendTempoSample(parseFloat(e.target.value), true);
+    isDraggingLocally = false;
+  });
+}
 
 // ---- live position readout & drift smoothing ------------------------------
 
@@ -585,9 +766,16 @@ function tick() {
       updateNudge(smoothedDriftUs);
     }
   }
+  renderTempoFader();
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
+
+document.getElementById("m-tempo-delay").textContent = (TEMPO_INTERPOLATION_DELAY_US / 1000).toFixed(0);
+setInterval(() => {
+  document.getElementById("m-tempo-send-rate").textContent = `${tempoSamplesSentInWindow}/s`;
+  tempoSamplesSentInWindow = 0;
+}, 1000);
 
 // A slower, logged trace of the smoothed drift + nudge status so it's
 // visible in the timestamped log panel too - useful when comparing several

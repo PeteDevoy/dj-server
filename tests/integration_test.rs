@@ -263,3 +263,103 @@ async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot_after["revision"], 1);
 }
+
+#[tokio::test]
+async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A raises tempo to +6%; both clients converge on one event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_tempo_request", "request_id": "req-tempo-fast", "playback_rate": 1.06}),
+    )
+    .await;
+
+    let event_a = recv_until(&mut client_a, "transport_event").await;
+    let event_b = recv_until(&mut client_b, "transport_event").await;
+
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["action"], "set_tempo");
+    assert_eq!(event_a["playback_rate"], 1.06);
+    assert_eq!(event_a["revision"], 1);
+
+    // An out-of-range request must be rejected with an error, not applied.
+    send_json(
+        &mut client_b,
+        json!({"type": "set_tempo_request", "request_id": "req-tempo-bad", "playback_rate": 2.0}),
+    )
+    .await;
+    let error = recv_until(&mut client_b, "error").await;
+    assert_eq!(error["request_id"], "req-tempo-bad");
+
+    // The rejected request must not have bumped the revision or changed the rate.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-bad-tempo"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["transport"]["playback_rate"], 1.06);
+
+    // A subsequent play carries the new tempo forward.
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-play-after-tempo", "action": "play"}),
+    )
+    .await;
+    let play_event = recv_until(&mut client_a, "transport_event").await;
+    assert_eq!(play_event["action"], "play");
+    assert_eq!(play_event["playback_rate"], 1.06);
+}
+
+#[tokio::test]
+async fn rapid_tempo_samples_each_get_a_distinct_ordered_broadcast() {
+    // Simulates a fader drag: many quick tempo samples in succession. Every
+    // one must be individually broadcast (not merged/coalesced) with a
+    // strictly increasing revision, and applied immediately (no lead time) -
+    // this is the server-side half of the sample+interpolate design; the
+    // client is what buffers/smooths these for display.
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Starts above 1.0 since the room's default rate already *is* 1.0 -
+    // a sample equal to the current rate is treated as idempotent (no new
+    // revision), same as schedule_play being a no-op while already playing.
+    let samples = [1.01, 1.02, 1.03, 1.04, 1.05];
+    for (i, rate) in samples.iter().enumerate() {
+        send_json(
+            &mut client_a,
+            json!({"type": "set_tempo_request", "request_id": format!("drag-{i}"), "playback_rate": rate}),
+        )
+        .await;
+    }
+
+    let mut last_revision = 0;
+    for expected_rate in samples {
+        let event_a = recv_until(&mut client_a, "transport_event").await;
+        let event_b = recv_until(&mut client_b, "transport_event").await;
+        assert_eq!(event_a["event_id"], event_b["event_id"]);
+        assert_eq!(event_a["playback_rate"], expected_rate);
+        let revision = event_a["revision"].as_u64().unwrap();
+        assert!(revision > last_revision, "revisions must strictly increase");
+        last_revision = revision;
+    }
+
+    // Immediate application: effective time tracks receipt, not +150ms.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-drag"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["transport"]["playback_rate"], 1.05);
+}

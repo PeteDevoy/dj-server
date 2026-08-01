@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Playback rate is clamped to +/-6% of normal speed.
+pub const MIN_PLAYBACK_RATE: f64 = 0.94;
+pub const MAX_PLAYBACK_RATE: f64 = 1.06;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportAction {
@@ -9,6 +13,9 @@ pub enum TransportAction {
     /// Resets the playhead to the beginning of the track without changing
     /// whether it's playing or paused.
     Restart,
+    /// Changes the canonical playback rate without changing whether it's
+    /// playing or paused.
+    SetTempo,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,20 +47,41 @@ pub enum ClientMessage {
         request_id: String,
         enabled: bool,
     },
+    /// Sets the canonical playback rate, synced room-wide like play/pause.
+    SetTempoRequest {
+        request_id: String,
+        playback_rate: f64,
+    },
 }
 
 impl ClientMessage {
-    /// Basic field validation beyond what serde already enforces via types.
-    pub fn validate(&self) -> Result<(), String> {
-        let request_id = match self {
+    pub fn request_id(&self) -> &str {
+        match self {
             ClientMessage::ClockRequest { request_id, .. } => request_id,
             ClientMessage::TransportRequest { request_id, .. } => request_id,
             ClientMessage::StateRequest { request_id } => request_id,
             ClientMessage::SetNudgeEnabled { request_id, .. } => request_id,
-        };
+            ClientMessage::SetTempoRequest { request_id, .. } => request_id,
+        }
+    }
+
+    /// Basic field validation beyond what serde already enforces via types.
+    pub fn validate(&self) -> Result<(), String> {
+        let request_id = self.request_id();
         if request_id.trim().is_empty() {
             return Err("request_id must not be empty".to_string());
         }
+
+        if let ClientMessage::SetTempoRequest { playback_rate, .. } = self {
+            // A small epsilon guards against a slider's floating-point steps
+            // landing a hair outside the nominal bound.
+            if *playback_rate < MIN_PLAYBACK_RATE - 1e-9 || *playback_rate > MAX_PLAYBACK_RATE + 1e-9 {
+                return Err(format!(
+                    "playback_rate must be between {MIN_PLAYBACK_RATE} and {MAX_PLAYBACK_RATE}"
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -193,6 +221,24 @@ mod tests {
     }
 
     #[test]
+    fn serializes_transport_event_set_tempo() {
+        let msg = ServerMessage::TransportEvent {
+            event_id: Uuid::nil(),
+            request_id: "request-96".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 4,
+            action: TransportAction::SetTempo,
+            effective_server_time_us: 60_000_000,
+            position_us: 5_000_000,
+            playback_rate: 1.03,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "transport_event");
+        assert_eq!(json["action"], "set_tempo");
+        assert_eq!(json["playback_rate"], 1.03);
+    }
+
+    #[test]
     fn serializes_state_snapshot() {
         let msg = ServerMessage::StateSnapshot {
             server_time_us: 48_111_492,
@@ -222,6 +268,45 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn deserializes_set_tempo_request() {
+        let json = r#"{"type":"set_tempo_request","request_id":"request-96","playback_rate":1.03}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetTempoRequest { request_id, playback_rate } => {
+                assert_eq!(request_id, "request-96");
+                assert_eq!(playback_rate, 1.03);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn accepts_playback_rate_at_the_bounds() {
+        let json = format!(
+            r#"{{"type":"set_tempo_request","request_id":"r","playback_rate":{MIN_PLAYBACK_RATE}}}"#
+        );
+        let msg: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(msg.validate().is_ok());
+
+        let json = format!(
+            r#"{{"type":"set_tempo_request","request_id":"r","playback_rate":{MAX_PLAYBACK_RATE}}}"#
+        );
+        let msg: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_playback_rate_outside_bounds() {
+        let json = r#"{"type":"set_tempo_request","request_id":"r","playback_rate":1.5}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_err());
+
+        let json = r#"{"type":"set_tempo_request","request_id":"r","playback_rate":0.5}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_err());
     }
 
     #[test]

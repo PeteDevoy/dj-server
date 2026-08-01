@@ -22,6 +22,17 @@ const DEDUP_CACHE_CAPACITY: usize = 256;
 /// bursts without ever blocking the room lock on a slow socket.
 const OUTBOUND_CHANNEL_CAPACITY: usize = 64;
 
+/// Tempo requests apply with no lead time, unlike play/pause/restart.
+/// The schedule-ahead convention exists to let clients prepare for a rare,
+/// discrete, precisely-synchronized moment; tempo is now a continuous stream
+/// of frequent samples (client throttles sends to ~25-50ms while the fader
+/// moves, plus a forced final send on release), so hiding latency is instead
+/// the receiving client's job via a buffered/interpolated render (see
+/// `applyTempoSample` and the render loop in public/index.html). Scheduling
+/// each sample 150ms out would just make the audio perpetually chase a
+/// stale target.
+const TEMPO_SAMPLE_LEAD_TIME_US: u64 = 0;
+
 #[derive(Default)]
 struct SeenRequests {
     order: VecDeque<String>,
@@ -193,7 +204,7 @@ async fn handle_client_message(
     if let Err(reason) = message.validate() {
         let _ = outbound_tx
             .send(ServerMessage::Error {
-                request_id: None,
+                request_id: Some(message.request_id().to_string()),
                 code: "invalid_message".to_string(),
                 message: reason,
             })
@@ -223,10 +234,13 @@ async fn handle_client_message(
             let _ = outbound_tx.send(snapshot).await;
         }
         ClientMessage::TransportRequest { request_id, action } => {
-            handle_transport_request(request_id, action, state, connection_id).await;
+            handle_transport_request(request_id, action, state, connection_id, outbound_tx).await;
         }
         ClientMessage::SetNudgeEnabled { request_id, enabled } => {
             handle_set_nudge_enabled(request_id, enabled, state, connection_id).await;
+        }
+        ClientMessage::SetTempoRequest { request_id, playback_rate } => {
+            handle_set_tempo_request(request_id, playback_rate, state, connection_id).await;
         }
     }
 }
@@ -236,6 +250,7 @@ async fn handle_transport_request(
     action: crate::protocol::TransportAction,
     state: &Arc<AppState>,
     connection_id: Uuid,
+    outbound_tx: &mpsc::Sender<ServerMessage>,
 ) {
     {
         let mut seen = state.seen_requests.lock().await;
@@ -257,6 +272,18 @@ async fn handle_transport_request(
             }
             crate::protocol::TransportAction::Restart => {
                 room.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
+            }
+            crate::protocol::TransportAction::SetTempo => {
+                drop(room);
+                let _ = outbound_tx
+                    .send(ServerMessage::Error {
+                        request_id: Some(request_id.clone()),
+                        code: "invalid_message".to_string(),
+                        message: "set_tempo is not valid for transport_request; use set_tempo_request instead"
+                            .to_string(),
+                    })
+                    .await;
+                return;
             }
         }
     };
@@ -329,6 +356,55 @@ async fn handle_set_nudge_enabled(
         origin_connection_id: connection_id,
         revision: event_data.revision,
         enabled: event_data.enabled,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_tempo_request(
+    request_id: String,
+    playback_rate: f64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_tempo request ignored");
+            return;
+        }
+    }
+
+    let received_server_time_us = state.clock.now_us();
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.schedule_playback_rate(received_server_time_us, TEMPO_SAMPLE_LEAD_TIME_US, playback_rate)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        playback_rate,
+        received_server_time_us,
+        effective_server_time_us = event_data.effective_server_time_us,
+        revision = event_data.revision,
+        position_us = event_data.position_us,
+        connected_client_count,
+        "tempo change accepted"
+    );
+
+    let event = ServerMessage::TransportEvent {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        action: event_data.action,
+        effective_server_time_us: event_data.effective_server_time_us,
+        position_us: event_data.position_us,
+        playback_rate: event_data.playback_rate,
     };
 
     let _ = state.events.send(event);
