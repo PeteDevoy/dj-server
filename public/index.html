@@ -455,8 +455,10 @@ function updateCueButtonUi() {
 let loopRegion = null; // {start_us, end_us, active} | null - null until a loop has ever been inserted this session
 
 const LOOP_BEAT_COUNT = 16;
-const LOOP_ACTIVE_COLOR = "rgba(255, 191, 0, 0.8)"; // amber
-const LOOP_INACTIVE_COLOR = "rgba(128, 128, 128, 0.15)"; // grey, ~15% opacity
+// The loop's active/inactive colors live in waveform.js (where the region
+// is actually rendered), not here - there's no cross-script constant
+// sharing set up, so a copy here would be dead code that looks load-bearing
+// but silently does nothing if edited.
 
 /// Wraps `rawPositionUs` into the active loop's bounds if one exists and
 /// `anchorPositionUs` (the position this raw value was computed FROM) sits
