@@ -62,19 +62,19 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
     assert_eq!(welcome_a["schedule_lead_time_us"], 150_000);
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["revision"], 0);
-    assert_eq!(snapshot_a["transport"]["playing"], false);
-    assert_eq!(snapshot_a["nudge_enabled"], true);
+    assert_eq!(snapshot_a["deck_a"]["revision"], 0);
+    assert_eq!(snapshot_a["deck_a"]["transport"]["playing"], false);
+    assert_eq!(snapshot_a["deck_a"]["nudge_enabled"], true);
 
     let _welcome_b = recv_until(&mut client_b, "welcome").await;
     let snapshot_b = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot_b["revision"], 0);
+    assert_eq!(snapshot_b["deck_a"]["revision"], 0);
 
     // Client A requests play; both clients must receive the identical
     // canonical event (same event_id, effective time, and revision).
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "request-91", "action": "play"}),
+        json!({"type": "transport_request", "request_id": "request-91", "deck": "a", "action": "play"}),
     )
     .await;
 
@@ -82,6 +82,7 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
     let play_b = recv_until(&mut client_b, "transport_event").await;
 
     assert_eq!(play_a["event_id"], play_b["event_id"]);
+    assert_eq!(play_a["deck"], "a");
     assert_eq!(play_a["effective_server_time_us"], play_b["effective_server_time_us"]);
     assert_eq!(play_a["revision"], play_b["revision"]);
     assert_eq!(play_a["revision"], 1);
@@ -92,7 +93,7 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
     // Client B requests pause; both clients again converge on one event.
     send_json(
         &mut client_b,
-        json!({"type": "transport_request", "request_id": "request-92", "action": "pause"}),
+        json!({"type": "transport_request", "request_id": "request-92", "deck": "a", "action": "pause"}),
     )
     .await;
 
@@ -112,16 +113,79 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
     )
     .await;
     let final_snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(final_snapshot["revision"], 2);
-    assert_eq!(final_snapshot["transport"]["playing"], false);
+    assert_eq!(final_snapshot["deck_a"]["revision"], 2);
+    assert_eq!(final_snapshot["deck_a"]["transport"]["playing"], false);
     assert_eq!(
-        final_snapshot["transport"]["anchor_position_us"],
+        final_snapshot["deck_a"]["transport"]["anchor_position_us"],
         pause_a["position_us"]
     );
     assert_eq!(
-        final_snapshot["transport"]["anchor_server_time_us"],
+        final_snapshot["deck_a"]["transport"]["anchor_server_time_us"],
         pause_a["effective_server_time_us"]
     );
+}
+
+#[tokio::test]
+async fn deck_a_and_deck_b_are_fully_independent() {
+    // The core claim of the two-deck refactor: an action on one deck must
+    // never be visible on the other, and each has its own revision counter.
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-play-a", "deck": "a", "action": "play"}),
+    )
+    .await;
+    let play_a = recv_until(&mut client_a, "transport_event").await;
+    assert_eq!(play_a["deck"], "a");
+    assert_eq!(play_a["revision"], 1);
+
+    send_json(
+        &mut client_a,
+        json!({"type": "seek_request", "request_id": "req-seek-a", "deck": "a", "position_us": 4_500_000}),
+    )
+    .await;
+    let seek_a = recv_until(&mut client_a, "transport_event").await;
+    assert_eq!(seek_a["deck"], "a");
+    assert_eq!(seek_a["revision"], 2);
+
+    // Deck B must be completely untouched: still paused, position 0,
+    // revision 0 - despite deck A having reached revision 2.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-check"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["deck_a"]["revision"], 2);
+    assert_eq!(snapshot["deck_a"]["transport"]["playing"], true);
+    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000);
+    assert_eq!(snapshot["deck_b"]["revision"], 0);
+    assert_eq!(snapshot["deck_b"]["transport"]["playing"], false);
+    assert_eq!(snapshot["deck_b"]["transport"]["anchor_position_us"], 0);
+
+    // Now drive deck B independently and confirm deck A stays exactly where it was.
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-play-b", "deck": "b", "action": "play"}),
+    )
+    .await;
+    let play_b = recv_until(&mut client_a, "transport_event").await;
+    assert_eq!(play_b["deck"], "b");
+    assert_eq!(play_b["revision"], 1); // deck B's OWN revision counter, independent of deck A's
+
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-check-2"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["deck_a"]["revision"], 2); // unchanged
+    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000); // unchanged
+    assert_eq!(snapshot["deck_b"]["revision"], 1);
+    assert_eq!(snapshot["deck_b"]["transport"]["playing"], true);
 }
 
 #[tokio::test]
@@ -152,7 +216,7 @@ async fn duplicate_request_id_is_not_applied_twice() {
     let _welcome = recv_until(&mut client, "welcome").await;
     let _snapshot = recv_until(&mut client, "state_snapshot").await;
 
-    let play_request = json!({"type": "transport_request", "request_id": "dup-1", "action": "play"});
+    let play_request = json!({"type": "transport_request", "request_id": "dup-1", "deck": "a", "action": "play"});
     send_json(&mut client, play_request.clone()).await;
     let first = recv_until(&mut client, "transport_event").await;
     assert_eq!(first["revision"], 1);
@@ -167,7 +231,7 @@ async fn duplicate_request_id_is_not_applied_twice() {
     )
     .await;
     let snapshot = recv_until(&mut client, "state_snapshot").await;
-    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
 }
 
 #[tokio::test]
@@ -181,7 +245,7 @@ async fn restart_resets_position_but_keeps_playing_and_broadcasts_to_both_client
 
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "req-play", "action": "play"}),
+        json!({"type": "transport_request", "request_id": "req-play", "deck": "a", "action": "play"}),
     )
     .await;
     let play_a = recv_until(&mut client_a, "transport_event").await;
@@ -190,7 +254,7 @@ async fn restart_resets_position_but_keeps_playing_and_broadcasts_to_both_client
 
     send_json(
         &mut client_b,
-        json!({"type": "transport_request", "request_id": "req-restart", "action": "restart"}),
+        json!({"type": "transport_request", "request_id": "req-restart", "deck": "a", "action": "restart"}),
     )
     .await;
 
@@ -210,8 +274,8 @@ async fn restart_resets_position_but_keeps_playing_and_broadcasts_to_both_client
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["transport"]["playing"], true);
-    assert_eq!(snapshot["transport"]["anchor_position_us"], 0);
+    assert_eq!(snapshot["deck_a"]["transport"]["playing"], true);
+    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 0);
 }
 
 #[tokio::test]
@@ -225,7 +289,7 @@ async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
 
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "req-play", "action": "play"}),
+        json!({"type": "transport_request", "request_id": "req-play", "deck": "a", "action": "play"}),
     )
     .await;
     let play_a = recv_until(&mut client_a, "transport_event").await;
@@ -234,7 +298,7 @@ async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
 
     send_json(
         &mut client_b,
-        json!({"type": "seek_request", "request_id": "req-seek", "position_us": 4_500_000}),
+        json!({"type": "seek_request", "request_id": "req-seek", "deck": "a", "position_us": 4_500_000}),
     )
     .await;
 
@@ -253,8 +317,8 @@ async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["transport"]["playing"], true);
-    assert_eq!(snapshot["transport"]["anchor_position_us"], 4_500_000);
+    assert_eq!(snapshot["deck_a"]["transport"]["playing"], true);
+    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000);
 }
 
 #[tokio::test]
@@ -264,12 +328,12 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
     let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["cue_point_us"], Value::Null);
+    assert!(snapshot_a["deck_a"]["cue_point_us"].is_null());
     let _ = recv_until(&mut client_b, "state_snapshot").await;
 
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "req-play", "action": "play"}),
+        json!({"type": "transport_request", "request_id": "req-play", "deck": "a", "action": "play"}),
     )
     .await;
     let _ = recv_until(&mut client_a, "transport_event").await;
@@ -278,7 +342,7 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
     // B sets a cue point while A never touches anything.
     send_json(
         &mut client_b,
-        json!({"type": "set_cue_point", "request_id": "req-cue-set", "position_us": 6_000_000}),
+        json!({"type": "set_cue_point", "request_id": "req-cue-set", "deck": "a", "position_us": 6_000_000}),
     )
     .await;
     let cue_a = recv_until(&mut client_a, "cue_point_changed").await;
@@ -294,15 +358,15 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["cue_point_us"], 6_000_000);
-    assert_eq!(snapshot["transport"]["playing"], true); // setting a cue point must not affect playback
+    assert_eq!(snapshot["deck_a"]["cue_point_us"], 6_000_000);
+    assert_eq!(snapshot["deck_a"]["transport"]["playing"], true); // setting a cue point must not affect playback
 
     // A releases the cue (still playing) - transport must pause exactly at
     // the cue point, broadcast to both, without either client having to
     // supply the position themselves.
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "req-cue-release", "action": "cue_release"}),
+        json!({"type": "transport_request", "request_id": "req-cue-release", "deck": "a", "action": "cue_release"}),
     )
     .await;
     let release_a = recv_until(&mut client_a, "transport_event").await;
@@ -318,8 +382,8 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
     )
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot["transport"]["playing"], false);
-    assert_eq!(snapshot["transport"]["anchor_position_us"], 6_000_000);
+    assert_eq!(snapshot["deck_a"]["transport"]["playing"], false);
+    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 6_000_000);
 }
 
 #[tokio::test]
@@ -329,13 +393,13 @@ async fn set_loop_syncs_cue_point_and_loop_to_both_clients() {
     let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["loop_region"], Value::Null);
+    assert!(snapshot_a["deck_a"]["loop_region"].is_null());
     let _ = recv_until(&mut client_b, "state_snapshot").await;
 
     // A inserts a loop; B never touches anything.
     send_json(
         &mut client_a,
-        json!({"type": "set_loop", "request_id": "req-loop-set", "start_us": 1_000_000, "end_us": 3_000_000}),
+        json!({"type": "set_loop", "request_id": "req-loop-set", "deck": "a", "start_us": 1_000_000, "end_us": 3_000_000}),
     )
     .await;
 
@@ -361,15 +425,15 @@ async fn set_loop_syncs_cue_point_and_loop_to_both_clients() {
     )
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot["loop_region"]["start_us"], 1_000_000);
-    assert_eq!(snapshot["loop_region"]["end_us"], 3_000_000);
-    assert_eq!(snapshot["loop_region"]["active"], true);
-    assert_eq!(snapshot["cue_point_us"], 1_000_000);
+    assert_eq!(snapshot["deck_a"]["loop_region"]["start_us"], 1_000_000);
+    assert_eq!(snapshot["deck_a"]["loop_region"]["end_us"], 3_000_000);
+    assert_eq!(snapshot["deck_a"]["loop_region"]["active"], true);
+    assert_eq!(snapshot["deck_a"]["cue_point_us"], 1_000_000);
 
     // B deactivates the loop; A observes it without having touched anything.
     send_json(
         &mut client_b,
-        json!({"type": "set_loop_active", "request_id": "req-loop-deactivate", "active": false}),
+        json!({"type": "set_loop_active", "request_id": "req-loop-deactivate", "deck": "a", "active": false}),
     )
     .await;
     let deactivate_a = recv_until(&mut client_a, "loop_changed").await;
@@ -389,7 +453,7 @@ async fn set_loop_active_with_no_loop_is_silently_ignored() {
 
     send_json(
         &mut client_a,
-        json!({"type": "set_loop_active", "request_id": "req-no-loop", "active": true}),
+        json!({"type": "set_loop_active", "request_id": "req-no-loop", "deck": "a", "active": true}),
     )
     .await;
 
@@ -401,8 +465,8 @@ async fn set_loop_active_with_no_loop_is_silently_ignored() {
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["loop_region"], Value::Null);
-    assert_eq!(snapshot["revision"], 0); // untouched
+    assert!(snapshot["deck_a"]["loop_region"].is_null());
+    assert_eq!(snapshot["deck_a"]["revision"], 0); // untouched
 }
 
 #[tokio::test]
@@ -412,13 +476,13 @@ async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["nudge_enabled"], true);
+    assert_eq!(snapshot_a["deck_a"]["nudge_enabled"], true);
     let _ = recv_until(&mut client_b, "state_snapshot").await;
 
     // Client A disables it; both clients must converge on the same event.
     send_json(
         &mut client_a,
-        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off", "enabled": false}),
+        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off", "deck": "a", "enabled": false}),
     )
     .await;
 
@@ -437,13 +501,13 @@ async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot["nudge_enabled"], false);
-    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["deck_a"]["nudge_enabled"], false);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
 
     // Repeating the same value is idempotent: no new event, no revision bump.
     send_json(
         &mut client_a,
-        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off-again", "enabled": false}),
+        json!({"type": "set_nudge_enabled", "request_id": "req-nudge-off-again", "deck": "a", "enabled": false}),
     )
     .await;
     send_json(
@@ -452,7 +516,7 @@ async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_after["revision"], 1);
+    assert_eq!(snapshot_after["deck_a"]["revision"], 1);
 }
 
 #[tokio::test]
@@ -462,13 +526,13 @@ async fn bass_cut_setting_syncs_to_both_clients_and_is_idempotent() {
     let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["bass_cut_enabled"], false);
+    assert_eq!(snapshot_a["deck_a"]["bass_cut_enabled"], false);
     let _ = recv_until(&mut client_b, "state_snapshot").await;
 
     // Client A enables it; both clients must converge on the same event.
     send_json(
         &mut client_a,
-        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on", "enabled": true}),
+        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on", "deck": "a", "enabled": true}),
     )
     .await;
 
@@ -487,13 +551,13 @@ async fn bass_cut_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot["bass_cut_enabled"], true);
-    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["deck_a"]["bass_cut_enabled"], true);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
 
     // Repeating the same value is idempotent: no new event, no revision bump.
     send_json(
         &mut client_a,
-        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on-again", "enabled": true}),
+        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on-again", "deck": "a", "enabled": true}),
     )
     .await;
     send_json(
@@ -502,7 +566,7 @@ async fn bass_cut_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_after["revision"], 1);
+    assert_eq!(snapshot_after["deck_a"]["revision"], 1);
 }
 
 #[tokio::test]
@@ -512,13 +576,13 @@ async fn pitch_lock_setting_syncs_to_both_clients_and_is_idempotent() {
     let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_a["pitch_lock_enabled"], true);
+    assert_eq!(snapshot_a["deck_a"]["pitch_lock_enabled"], true);
     let _ = recv_until(&mut client_b, "state_snapshot").await;
 
     // Client A disables it; both clients must converge on the same event.
     send_json(
         &mut client_a,
-        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off", "enabled": false}),
+        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off", "deck": "a", "enabled": false}),
     )
     .await;
 
@@ -537,13 +601,13 @@ async fn pitch_lock_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
-    assert_eq!(snapshot["pitch_lock_enabled"], false);
-    assert_eq!(snapshot["revision"], 1);
+    assert_eq!(snapshot["deck_a"]["pitch_lock_enabled"], false);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
 
     // Repeating the same value is idempotent: no new event, no revision bump.
     send_json(
         &mut client_a,
-        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off-again", "enabled": false}),
+        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off-again", "deck": "a", "enabled": false}),
     )
     .await;
     send_json(
@@ -552,7 +616,7 @@ async fn pitch_lock_setting_syncs_to_both_clients_and_is_idempotent() {
     )
     .await;
     let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot_after["revision"], 1);
+    assert_eq!(snapshot_after["deck_a"]["revision"], 1);
 }
 
 #[tokio::test]
@@ -567,7 +631,7 @@ async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     // Client A raises tempo to +6%; both clients converge on one event.
     send_json(
         &mut client_a,
-        json!({"type": "set_tempo_request", "request_id": "req-tempo-fast", "playback_rate": 1.06}),
+        json!({"type": "set_tempo_request", "request_id": "req-tempo-fast", "deck": "a", "playback_rate": 1.06}),
     )
     .await;
 
@@ -582,7 +646,7 @@ async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     // An out-of-range request must be rejected with an error, not applied.
     send_json(
         &mut client_b,
-        json!({"type": "set_tempo_request", "request_id": "req-tempo-bad", "playback_rate": 2.0}),
+        json!({"type": "set_tempo_request", "request_id": "req-tempo-bad", "deck": "a", "playback_rate": 2.0}),
     )
     .await;
     let error = recv_until(&mut client_b, "error").await;
@@ -595,13 +659,13 @@ async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["revision"], 1);
-    assert_eq!(snapshot["transport"]["playback_rate"], 1.06);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
+    assert_eq!(snapshot["deck_a"]["transport"]["playback_rate"], 1.06);
 
     // A subsequent play carries the new tempo forward.
     send_json(
         &mut client_a,
-        json!({"type": "transport_request", "request_id": "req-play-after-tempo", "action": "play"}),
+        json!({"type": "transport_request", "request_id": "req-play-after-tempo", "deck": "a", "action": "play"}),
     )
     .await;
     let play_event = recv_until(&mut client_a, "transport_event").await;
@@ -629,7 +693,7 @@ async fn rapid_tempo_samples_each_get_a_distinct_ordered_broadcast() {
     for (i, rate) in samples.iter().enumerate() {
         send_json(
             &mut client_a,
-            json!({"type": "set_tempo_request", "request_id": format!("drag-{i}"), "playback_rate": rate}),
+            json!({"type": "set_tempo_request", "request_id": format!("drag-{i}"), "deck": "a", "playback_rate": rate}),
         )
         .await;
     }
@@ -652,5 +716,5 @@ async fn rapid_tempo_samples_each_get_a_distinct_ordered_broadcast() {
     )
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
-    assert_eq!(snapshot["transport"]["playback_rate"], 1.05);
+    assert_eq!(snapshot["deck_a"]["transport"]["playback_rate"], 1.05);
 }

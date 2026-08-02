@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::clock::ServerTimeUs;
-use crate::protocol::{TransportAction, TransportStateDto};
+use crate::protocol::{DeckId, TransportAction, TransportStateDto};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransportState {
@@ -95,7 +95,7 @@ pub struct LoopEventData {
 }
 
 #[derive(Debug, Clone)]
-pub struct RoomState {
+pub struct DeckState {
     pub transport: TransportState,
     /// Whether clients should apply local tempo-nudge drift correction.
     /// Not part of the transport timeline, but shares its revision counter
@@ -118,7 +118,7 @@ pub struct RoomState {
     pub revision: u64,
 }
 
-impl RoomState {
+impl DeckState {
     pub fn new() -> Self {
         Self {
             transport: TransportState::initial(),
@@ -437,6 +437,48 @@ impl RoomState {
     }
 }
 
+impl Default for DeckState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The room holds two fully independent decks - own transport, cue point,
+/// loop, settings, and revision counter each. There's no cross-deck shared
+/// state at all (deliberately: sharing one revision counter across two
+/// independent decks would mean every handler needs to reason about which
+/// deck a given revision bump "belongs to" for no real benefit - two
+/// self-contained counters, one per deck, is simpler and exactly mirrors
+/// having two independent rooms that happen to share a connection).
+#[derive(Debug, Clone)]
+pub struct RoomState {
+    pub deck_a: DeckState,
+    pub deck_b: DeckState,
+}
+
+impl RoomState {
+    pub fn new() -> Self {
+        Self {
+            deck_a: DeckState::new(),
+            deck_b: DeckState::new(),
+        }
+    }
+
+    pub fn deck(&self, id: DeckId) -> &DeckState {
+        match id {
+            DeckId::A => &self.deck_a,
+            DeckId::B => &self.deck_b,
+        }
+    }
+
+    pub fn deck_mut(&mut self, id: DeckId) -> &mut DeckState {
+        match id {
+            DeckId::A => &mut self.deck_a,
+            DeckId::B => &mut self.deck_b,
+        }
+    }
+}
+
 impl Default for RoomState {
     fn default() -> Self {
         Self::new()
@@ -487,7 +529,7 @@ mod tests {
 
     #[test]
     fn schedule_play_from_paused_sets_future_anchor() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         let event = room.schedule_play(48_225_000, 150_000);
 
         assert_eq!(event.effective_server_time_us, 48_375_000);
@@ -501,7 +543,7 @@ mod tests {
 
     #[test]
     fn schedule_play_preserves_position_already_in_progress() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         // Advance time, then pause partway through, then play again.
         let pause_event = room.schedule_pause(1_150_000, 150_000);
@@ -514,7 +556,7 @@ mod tests {
 
     #[test]
     fn schedule_play_is_idempotent_while_already_playing() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let revision_after_first_play = room.revision;
 
@@ -526,7 +568,7 @@ mod tests {
 
     #[test]
     fn schedule_pause_freezes_position_at_effective_time() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
 
         let event = room.schedule_pause(48_100_000, 150_000);
@@ -541,7 +583,7 @@ mod tests {
 
     #[test]
     fn revisions_increase_monotonically_across_transitions() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         assert_eq!(room.revision, 0);
         room.schedule_play(0, 150_000);
         assert_eq!(room.revision, 1);
@@ -553,14 +595,14 @@ mod tests {
 
     #[test]
     fn current_position_matches_transport_position() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         assert_eq!(room.current_position(1_150_000), room.transport.position_at(1_150_000));
     }
 
     #[test]
     fn schedule_restart_zeroes_position_and_keeps_playing() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
 
         let event = room.schedule_restart(1_150_000, 150_000);
@@ -575,7 +617,7 @@ mod tests {
 
     #[test]
     fn schedule_restart_zeroes_position_and_keeps_paused() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.schedule_pause(1_150_000, 150_000);
 
@@ -588,7 +630,7 @@ mod tests {
 
     #[test]
     fn schedule_restart_increments_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let revision_after_play = room.revision;
 
@@ -599,7 +641,7 @@ mod tests {
 
     #[test]
     fn schedule_seek_jumps_to_target_position_and_keeps_playing() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
 
         let event = room.schedule_seek(1_150_000, 150_000, 4_500_000);
@@ -614,7 +656,7 @@ mod tests {
 
     #[test]
     fn schedule_seek_jumps_to_target_position_and_keeps_paused() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.schedule_pause(1_150_000, 150_000);
 
@@ -627,7 +669,7 @@ mod tests {
 
     #[test]
     fn schedule_seek_increments_revision_even_to_the_same_position() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.schedule_seek(1_000_000, 150_000, 4_500_000);
         let revision_after_first_seek = room.revision;
@@ -640,13 +682,13 @@ mod tests {
 
     #[test]
     fn cue_point_defaults_to_none() {
-        let room = RoomState::new();
+        let room = DeckState::new();
         assert_eq!(room.cue_point_us, None);
     }
 
     #[test]
     fn set_cue_point_stores_position_and_bumps_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         let revision_before = room.revision;
 
         let event = room.set_cue_point(6_000_000);
@@ -658,7 +700,7 @@ mod tests {
 
     #[test]
     fn set_cue_point_overwrites_and_bumps_revision_even_to_the_same_position() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_cue_point(6_000_000);
         let revision_after_first_set = room.revision;
 
@@ -673,7 +715,7 @@ mod tests {
 
     #[test]
     fn schedule_cue_release_pauses_at_the_cue_point() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.set_cue_point(6_000_000);
 
@@ -688,7 +730,7 @@ mod tests {
 
     #[test]
     fn schedule_cue_release_with_no_cue_point_is_a_no_op() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let revision_before = room.revision;
 
@@ -701,13 +743,13 @@ mod tests {
 
     #[test]
     fn loop_region_defaults_to_none() {
-        let room = RoomState::new();
+        let room = DeckState::new();
         assert_eq!(room.loop_region, None);
     }
 
     #[test]
     fn set_loop_creates_active_loop_and_moves_cue_point() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         let revision_before = room.revision;
 
         let (cue_event, loop_event) = room.set_loop(1_000_000, 3_000_000);
@@ -726,7 +768,7 @@ mod tests {
 
     #[test]
     fn set_loop_overwrites_existing_loop() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_loop(1_000_000, 3_000_000);
 
         room.set_loop(5_000_000, 9_000_000);
@@ -737,7 +779,7 @@ mod tests {
 
     #[test]
     fn set_loop_active_toggles_existing_loop() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_loop(1_000_000, 3_000_000);
         let revision_before = room.revision;
 
@@ -754,13 +796,13 @@ mod tests {
 
     #[test]
     fn set_loop_active_with_no_loop_returns_none() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         assert_eq!(room.set_loop_active(true), None);
     }
 
     #[test]
     fn current_position_wraps_within_active_loop_during_playback() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000); // anchor_position_us=0, anchor_server_time_us=150_000
         room.set_loop(1_000_000, 3_000_000); // 2s loop starting at 1s
 
@@ -774,7 +816,7 @@ mod tests {
 
     #[test]
     fn current_position_does_not_wrap_when_loop_inactive() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.set_loop(1_000_000, 3_000_000);
         room.set_loop_active(false);
@@ -786,7 +828,7 @@ mod tests {
 
     #[test]
     fn current_position_does_not_snap_back_when_seeked_past_loop_end() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.set_loop(1_000_000, 3_000_000);
 
@@ -800,7 +842,7 @@ mod tests {
 
     #[test]
     fn schedule_pause_freezes_at_wrapped_position_during_active_loop() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.set_loop(1_000_000, 3_000_000);
 
@@ -813,13 +855,13 @@ mod tests {
 
     #[test]
     fn nudge_enabled_defaults_to_true() {
-        let room = RoomState::new();
+        let room = DeckState::new();
         assert!(room.nudge_enabled);
     }
 
     #[test]
     fn set_nudge_enabled_toggles_and_bumps_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
 
         let event = room.set_nudge_enabled(false);
 
@@ -832,7 +874,7 @@ mod tests {
 
     #[test]
     fn set_nudge_enabled_is_idempotent_when_unchanged() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_nudge_enabled(false);
         let revision_after_first_toggle = room.revision;
 
@@ -844,7 +886,7 @@ mod tests {
 
     #[test]
     fn nudge_setting_shares_revision_counter_with_transport() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         assert_eq!(room.revision, 1);
 
@@ -857,13 +899,13 @@ mod tests {
 
     #[test]
     fn bass_cut_enabled_defaults_to_false() {
-        let room = RoomState::new();
+        let room = DeckState::new();
         assert!(!room.bass_cut_enabled);
     }
 
     #[test]
     fn set_bass_cut_enabled_toggles_and_bumps_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
 
         let event = room.set_bass_cut_enabled(true);
 
@@ -876,7 +918,7 @@ mod tests {
 
     #[test]
     fn set_bass_cut_enabled_is_idempotent_when_unchanged() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_bass_cut_enabled(true);
         let revision_after_first_toggle = room.revision;
 
@@ -888,7 +930,7 @@ mod tests {
 
     #[test]
     fn bass_cut_setting_shares_revision_counter_with_transport_and_nudge() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         assert_eq!(room.revision, 1);
 
@@ -901,13 +943,13 @@ mod tests {
 
     #[test]
     fn pitch_lock_enabled_defaults_to_true() {
-        let room = RoomState::new();
+        let room = DeckState::new();
         assert!(room.pitch_lock_enabled);
     }
 
     #[test]
     fn set_pitch_lock_enabled_toggles_and_bumps_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
 
         let event = room.set_pitch_lock_enabled(false);
 
@@ -920,7 +962,7 @@ mod tests {
 
     #[test]
     fn set_pitch_lock_enabled_is_idempotent_when_unchanged() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.set_pitch_lock_enabled(false);
         let revision_after_first_toggle = room.revision;
 
@@ -932,7 +974,7 @@ mod tests {
 
     #[test]
     fn pitch_lock_setting_shares_revision_counter_with_transport_and_other_settings() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         assert_eq!(room.revision, 1);
 
@@ -945,7 +987,7 @@ mod tests {
 
     #[test]
     fn schedule_playback_rate_reanchors_position_while_playing() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
 
         let event = room.schedule_playback_rate(48_100_000, 150_000, 1.03);
@@ -963,7 +1005,7 @@ mod tests {
 
     #[test]
     fn schedule_playback_rate_while_paused_keeps_position_and_paused_state() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
 
         let event = room.schedule_playback_rate(0, 150_000, 0.94);
 
@@ -975,7 +1017,7 @@ mod tests {
 
     #[test]
     fn schedule_playback_rate_is_idempotent_when_unchanged() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let revision_after_play = room.revision;
 
@@ -987,7 +1029,7 @@ mod tests {
 
     #[test]
     fn schedule_playback_rate_increments_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let revision_after_play = room.revision;
 
@@ -998,7 +1040,7 @@ mod tests {
 
     #[test]
     fn subsequent_play_after_tempo_change_carries_the_new_rate() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_playback_rate(0, 150_000, 1.06);
         room.schedule_pause(1_000_000, 150_000);
 
@@ -1012,7 +1054,7 @@ mod tests {
         // The continuous tempo-sample stream applies with no lead time (see
         // TEMPO_SAMPLE_LEAD_TIME_US in websocket.rs) - unlike play/pause/
         // restart, each sample takes effect at `now_us` itself.
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
 
         let event = room.schedule_playback_rate(48_100_000, 0, 1.03);
@@ -1024,7 +1066,7 @@ mod tests {
 
     #[test]
     fn successive_tempo_changes_each_get_a_strictly_increasing_revision() {
-        let mut room = RoomState::new();
+        let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         let after_play = room.revision;
 

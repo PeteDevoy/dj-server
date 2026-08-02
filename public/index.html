@@ -5,8 +5,9 @@
 <title>Shared Audio Clock - PoC</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; max-width: 780px; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+  body { font-family: system-ui, sans-serif; max-width: 1600px; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
   h1 { font-size: 1.3rem; }
+  h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
   section { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
   button { font-size: 1rem; padding: 0.4rem 1rem; margin-right: 0.5rem; }
   table { border-collapse: collapse; width: 100%; }
@@ -16,50 +17,64 @@
   .paused { color: #a22; }
   progress { width: 100%; }
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
-  #waveform { margin-top: 0.5rem; cursor: pointer; }
+  .waveform { margin-top: 0.5rem; cursor: pointer; }
+  .decks { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+  .deck { flex: 1 1 480px; min-width: 380px; }
+  .deck h3 { font-size: 0.95rem; margin: 1rem 0 0.25rem; }
+  .deck h3:first-of-type { margin-top: 0; }
 </style>
 </head>
 <body>
 <h1>Shared Audio Clock — Proof of Concept</h1>
 
 <section>
-  <strong>1. Preload the same audio file in every browser tab.</strong><br>
-  <input type="file" id="file-input" accept="audio/*" />
-  <span id="file-status">no file loaded</span>
-</section>
-
-<section>
-  <strong>2. Transport</strong><br>
-  <button id="play-pause-btn" disabled>Play / Pause</button>
-  <button id="restart-btn" disabled>⏮ Skip back</button>
-  <button id="cue-btn" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
-  <button id="loop-btn" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
-  <button id="reloop-btn" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
+  <strong>Connection</strong><br>
   <button id="state-btn" disabled>Refresh state</button>
   <button id="resync-btn" disabled>Resync clock</button>
+  <table>
+    <tr><th>connection_id</th><td id="m-connection-id">-</td></tr>
+    <tr><th>clock offset (server - local), us</th><td id="m-offset">-</td></tr>
+    <tr><th>best clock_sample_rtt_us</th><td id="m-rtt">-</td></tr>
+  </table>
+</section>
+
+<div class="decks">
+<section class="deck">
+  <h2>Deck A</h2>
+
+  <h3>Load file</h3>
+  <input type="file" id="file-input-a" accept="audio/*" />
+  <span id="file-status-a">no file loaded</span>
+
+  <h3>Transport</h3>
+  <button id="play-pause-btn-a" disabled>Play / Pause</button>
+  <button id="restart-btn-a" disabled>⏮ Skip back</button>
+  <button id="cue-btn-a" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="loop-btn-a" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
+  <button id="reloop-btn-a" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
   <p>
     <label>
-      <input type="checkbox" id="nudge-enabled-checkbox" checked disabled />
+      <input type="checkbox" id="nudge-enabled-checkbox-a" checked disabled />
       Tempo nudge drift correction (synced room-wide)
     </label>
   </p>
   <p>
     <label>
-      <input type="checkbox" id="drift-calibration-checkbox" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
+      <input type="checkbox" id="drift-calibration-checkbox-a" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
       Drift calibration (local only, not synced)
     </label>
   </p>
   <p>
     <label>
-      Tempo (synced room-wide<span id="pitch-lock-note">, pitch-locked</span>): <span id="tempo-readout">0.0%</span>
-      — BPM: <span id="bpm-readout">--</span>
-      <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.001" value="1" disabled />
+      Tempo (synced room-wide<span id="pitch-lock-note-a">, pitch-locked</span>): <span id="tempo-readout-a">0.0%</span>
+      — BPM: <span id="bpm-readout-a">--</span>
+      <input type="range" id="tempo-slider-a" min="0.94" max="1.06" step="0.001" value="1" disabled />
     </label>
   </p>
   <p>
     <label title="Which library analyses the loaded file for its tempo. Local only, not synced - remembered in a cookie.">
       BPM detection engine (local only):
-      <select id="bpm-engine-select">
+      <select id="bpm-engine-select-a">
         <option value="wabd">web-audio-beat-detector</option>
         <option value="beatdetect">BeatDetect.js</option>
       </select>
@@ -67,47 +82,120 @@
   </p>
   <p>
     <label>
-      <input type="checkbox" id="pitch-lock-checkbox" checked disabled />
+      <input type="checkbox" id="pitch-lock-checkbox-a" checked disabled />
       Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
     </label>
   </p>
   <p>
     <label>
-      <input type="checkbox" id="bass-cut-checkbox" disabled />
+      <input type="checkbox" id="bass-cut-checkbox-a" disabled />
       Cut bass (synced room-wide)
     </label>
   </p>
   <p>
-    Status: <span id="transport-status" class="paused">unknown</span> —
-    position: <span id="position-readout">0.000s</span>
+    Status: <span id="transport-status-a" class="paused">unknown</span> —
+    position: <span id="position-readout-a">0.000s</span>
   </p>
-  <progress id="position-bar" value="0" max="1"></progress>
-  <div id="waveform"></div>
-</section>
+  <progress id="position-bar-a" value="0" max="1"></progress>
+  <div class="waveform" id="waveform-a"></div>
 
-<section>
-  <strong>3. Measurements</strong>
+  <h3>Measurements</h3>
   <table>
-    <tr><th>connection_id</th><td id="m-connection-id">-</td></tr>
-    <tr><th>revision</th><td id="m-revision">-</td></tr>
-    <tr><th>clock offset (server - local), us</th><td id="m-offset">-</td></tr>
-    <tr><th>best clock_sample_rtt_us</th><td id="m-rtt">-</td></tr>
-    <tr><th>last scheduled_server_time_us</th><td id="m-scheduled">-</td></tr>
-    <tr><th>last estimated_actual_server_time_us</th><td id="m-actual">-</td></tr>
-    <tr><th>last scheduling_error_us</th><td id="m-error">-</td></tr>
-    <tr><th>live playback drift (audio − model), us</th><td id="m-drift">-</td></tr>
-    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed">-</td></tr>
-    <tr><th>local rate nudge</th><td id="m-nudge">off</td></tr>
-    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay">-</td></tr>
-    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate">-</td></tr>
-    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval">-</td></tr>
-    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded">0</td></tr>
-    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt">-</td></tr>
+    <tr><th>revision</th><td id="m-revision-a">-</td></tr>
+    <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-a">-</td></tr>
+    <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-a">-</td></tr>
+    <tr><th>last scheduling_error_us</th><td id="m-error-a">-</td></tr>
+    <tr><th>live playback drift (audio − model), us</th><td id="m-drift-a">-</td></tr>
+    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-a">-</td></tr>
+    <tr><th>local rate nudge</th><td id="m-nudge-a">off</td></tr>
+    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-a">-</td></tr>
+    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-a">-</td></tr>
+    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-a">-</td></tr>
+    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-a">0</td></tr>
+    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-a">-</td></tr>
   </table>
 </section>
 
+<section class="deck">
+  <h2>Deck B</h2>
+
+  <h3>Load file</h3>
+  <input type="file" id="file-input-b" accept="audio/*" />
+  <span id="file-status-b">no file loaded</span>
+
+  <h3>Transport</h3>
+  <button id="play-pause-btn-b" disabled>Play / Pause</button>
+  <button id="restart-btn-b" disabled>⏮ Skip back</button>
+  <button id="cue-btn-b" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="loop-btn-b" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
+  <button id="reloop-btn-b" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
+  <p>
+    <label>
+      <input type="checkbox" id="nudge-enabled-checkbox-b" checked disabled />
+      Tempo nudge drift correction (synced room-wide)
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="drift-calibration-checkbox-b" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
+      Drift calibration (local only, not synced)
+    </label>
+  </p>
+  <p>
+    <label>
+      Tempo (synced room-wide<span id="pitch-lock-note-b">, pitch-locked</span>): <span id="tempo-readout-b">0.0%</span>
+      — BPM: <span id="bpm-readout-b">--</span>
+      <input type="range" id="tempo-slider-b" min="0.94" max="1.06" step="0.001" value="1" disabled />
+    </label>
+  </p>
+  <p>
+    <label title="Which library analyses the loaded file for its tempo. Local only, not synced - remembered in a cookie.">
+      BPM detection engine (local only):
+      <select id="bpm-engine-select-b">
+        <option value="wabd">web-audio-beat-detector</option>
+        <option value="beatdetect">BeatDetect.js</option>
+      </select>
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="pitch-lock-checkbox-b" checked disabled />
+      Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="bass-cut-checkbox-b" disabled />
+      Cut bass (synced room-wide)
+    </label>
+  </p>
+  <p>
+    Status: <span id="transport-status-b" class="paused">unknown</span> —
+    position: <span id="position-readout-b">0.000s</span>
+  </p>
+  <progress id="position-bar-b" value="0" max="1"></progress>
+  <div class="waveform" id="waveform-b"></div>
+
+  <h3>Measurements</h3>
+  <table>
+    <tr><th>revision</th><td id="m-revision-b">-</td></tr>
+    <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-b">-</td></tr>
+    <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-b">-</td></tr>
+    <tr><th>last scheduling_error_us</th><td id="m-error-b">-</td></tr>
+    <tr><th>live playback drift (audio − model), us</th><td id="m-drift-b">-</td></tr>
+    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-b">-</td></tr>
+    <tr><th>local rate nudge</th><td id="m-nudge-b">off</td></tr>
+    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-b">-</td></tr>
+    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-b">-</td></tr>
+    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-b">-</td></tr>
+    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-b">0</td></tr>
+    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-b">-</td></tr>
+  </table>
+</section>
+</div>
+
 <section>
-  <strong>4. Log</strong>
+  <strong>Log</strong>
   <div id="log"></div>
 </section>
 
@@ -141,24 +229,10 @@ function log(message) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// ---- audio -------------------------------------------------------------
+// ---- audio (shared across decks: one AudioContext = one hardware output,
+// mixing whatever both decks are playing) ----------------------------------
 
 let audioCtx = null;
-let audioBuffer = null;
-let currentSource = null; // the AudioBufferSourceNode currently scheduled/playing
-
-// Where and when the *current* source actually starts sounding, in the
-// AudioContext's own clock - the ground truth for what's audible, as opposed
-// to `transport`'s server-time-derived model of where playback should be.
-// Comparing the two is what lets us measure real playback drift instead of
-// just JS-timer scheduling jitter.
-let currentSourceStart = null; // {contextTime, positionUs}
-
-// The actual playbackRate currently applied to currentSource. Normally equal
-// to transport.playback_rate (1.0), but a tempo nudge (see below) can pull it
-// slightly off that to correct local drift - a purely local correction the
-// server/model never knows about.
-let currentSourceRate = 1.0;
 
 function ensureAudioContext() {
   if (!audioCtx) {
@@ -167,76 +241,53 @@ function ensureAudioContext() {
   return audioCtx;
 }
 
+/// Maps a `performance.now()`-domain millisecond timestamp onto this
+/// AudioContext's `currentTime` timeline, using a fresh output-timestamp
+/// sample as the anchor between the two monotonic clocks. Shared by both
+/// decks - the mapping only depends on the (single, shared) AudioContext.
+function performanceMsToAudioContextTime(targetPerformanceMs) {
+  const ts = audioCtx.getOutputTimestamp();
+  const anchorPerformanceMs = ts.performanceTime ?? performance.now();
+  const anchorContextTime = ts.contextTime ?? audioCtx.currentTime;
+  return anchorContextTime + (targetPerformanceMs - anchorPerformanceMs) / 1000;
+}
+
 // ---- pitch lock (tempo without changing pitch) ---------------------------
 //
 // AudioBufferSourceNode.playbackRate changes speed AND pitch together (plain
 // resampling) - that's how the tempo control gets its speed change, but it
-// also raises/lowers pitch as an unwanted side effect. This node cancels
-// that out: it's a pitch shifter (see pitch-worklet.js) fed the *inverse*
-// ratio, so the net effect is speed changes via the source's playbackRate
-// while pitch stays locked to the original (0%) recording. It sits between
-// every source and the bass-cut filter, persistent across source swaps
-// exactly like the bass-cut filter - see setSourceRate for how its
-// pitchRatio param is kept in exact sync with the source's rate changes.
-let pitchShiftNode = null;
+// also raises/lowers pitch as an unwanted side effect. The pitch-shift
+// AudioWorklet processor (pitch-worklet.js) cancels that out. The worklet
+// module can only be registered ONCE per AudioContext (a second addModule
+// of the same processor name throws), so its loading is shared across both
+// decks here - each deck still creates its OWN AudioWorkletNode instance
+// from the one registered processor (see createDeck's ensurePitchShiftNode).
 let pitchWorkletLoadPromise = null;
 // null = not yet determined; true/false once known. AudioWorklet requires a
 // secure context (HTTPS or localhost) - a LAN IP over plain http:// doesn't
 // qualify even on a trusted network, so this is expected to be false there.
 let pitchWorkletAvailable = null;
 
-// Synced room-wide, like nudge_enabled/bass_cut_enabled - see
-// set_pitch_lock_enabled/pitch_lock_setting_changed in the websocket
-// section. Every connected client should hear the same tempo-vs-pitch
-// behavior, not just whoever happens to be dragging the fader.
-let pitchLockEnabled = true;
 const PITCH_LOCK_TOGGLE_RAMP_S = 0.05; // quick but click-free transition
+
+// A tempo of exactly 0% (transport.playback_rate === 1.0) means there's no
+// pitch shift for pitch-lock to be correcting in the first place - checked
+// against transport.playback_rate specifically (the tempo control's own
+// value), not the fully-composed rate: the tempo nudge corrector can pull
+// the actual source rate a hair off 1.0 even while tempo sits at 0%, but
+// that's not worth invoking the pitch shifter over.
+const TEMPO_ZERO_EPSILON = 1e-9;
 
 function markPitchLockUnavailable(reason) {
   pitchWorkletAvailable = false;
-  const note = document.getElementById("pitch-lock-note");
-  if (note) note.textContent = " (pitch lock unavailable on this device: needs HTTPS or localhost)";
-  // Deliberately NOT disabling the checkbox here: pitch-lock is a room-wide
-  // setting now, so even a client whose own browser can't apply it locally
-  // (no AudioWorklet) can still toggle it for everyone else who can.
+  for (const deckId of ["a", "b"]) {
+    const note = document.getElementById(`pitch-lock-note-${deckId}`);
+    if (note) note.textContent = " (pitch lock unavailable on this device: needs HTTPS or localhost)";
+  }
+  // Deliberately NOT disabling either pitch-lock checkbox here: pitch-lock is
+  // a room-wide setting, so even a client whose own browser can't apply it
+  // locally (no AudioWorklet) can still toggle it for everyone else who can.
   log(`pitch-lock unavailable on this device, continuing without it locally (tempo will affect pitch here too): ${reason}`);
-}
-
-// A tempo of exactly 0% (transport.playback_rate === 1.0) means there's no
-// pitch shift for pitch-lock to be correcting in the first place - so skip
-// invoking pitch correction entirely in that case, regardless of the
-// pitch-lock checkbox. Checked against transport.playback_rate specifically
-// (the tempo control's own value), not the fully-composed rate passed to
-// setSourceRate: the tempo nudge corrector can pull the actual source rate
-// a hair off 1.0 even while tempo sits at 0%, but that's not worth invoking
-// the pitch shifter over.
-const TEMPO_ZERO_EPSILON = 1e-9;
-
-function isTempoAtZero() {
-  return Math.abs(transport.playback_rate - 1.0) < TEMPO_ZERO_EPSILON;
-}
-
-/// The pitchRatio to send the pitch node for a given fully-composed source
-/// rate (tempo * nudge factor) - 1.0 (no correction) whenever pitch-lock is
-/// off or tempo is at 0%, otherwise the inverse of the composed rate.
-function computePitchTarget(composedRate) {
-  if (isTempoAtZero()) return 1.0;
-  return pitchLockEnabled ? 1 / composedRate : 1.0;
-}
-
-/// Applies a (now-canonical, server-confirmed) pitch-lock setting: updates
-/// the checkbox and ramps the pitch node to (or away from) correction right
-/// now, for the currently-playing source - so the audible difference lands
-/// immediately without needing to restart playback.
-function applyPitchLockEnabled(enabled) {
-  pitchLockEnabled = enabled;
-  document.getElementById("pitch-lock-checkbox").checked = enabled;
-  if (!pitchShiftNode || !audioCtx) return;
-  const target = computePitchTarget(currentSourceRate);
-  const param = pitchShiftNode.parameters.get("pitchRatio");
-  param.cancelScheduledValues(audioCtx.currentTime);
-  param.setValueAtTime(param.value, audioCtx.currentTime);
-  param.linearRampToValueAtTime(target, audioCtx.currentTime + PITCH_LOCK_TOGGLE_RAMP_S);
 }
 
 function ensurePitchWorkletLoaded(ctx) {
@@ -254,78 +305,18 @@ function ensurePitchWorkletLoaded(ctx) {
   return pitchWorkletLoadPromise;
 }
 
-function ensurePitchShiftNode() {
-  if (pitchWorkletAvailable === false) return null;
-  if (!pitchShiftNode) {
-    const ctx = ensureAudioContext();
-    const channelCount = audioBuffer ? audioBuffer.numberOfChannels : 2;
-    pitchShiftNode = new AudioWorkletNode(ctx, "pitch-shift-processor", {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [channelCount],
-    });
-    pitchShiftNode.connect(ensureBassCutFilter());
-  }
-  return pitchShiftNode;
-}
-
 // ---- bass cut (highpass filter) ------------------------------------------
 //
 // A synced room-wide effect, unlike the tempo nudge - a real DJ mixer's
-// "kill bass" switch. Implemented as one persistent BiquadFilterNode sitting
-// between every source and the destination, so its state (cutoff frequency)
-// survives across the play/pause/restart source swaps that already happen
-// elsewhere - only the filter's frequency needs to change, never the graph
-// wiring itself once the filter exists.
+// "kill bass" switch. Each deck gets its own persistent BiquadFilterNode
+// (see createDeck's ensureBassCutFilter) so its state survives across that
+// deck's play/pause/restart source swaps - only the filter's frequency needs
+// to change, never the graph wiring itself once the filter exists.
 const BASS_CUT_OFF_HZ = 20; // effectively no cut - below any audible bass fundamental
 const BASS_CUT_ON_HZ = 250; // cuts content below this, per intended use as a bass-kill
 const BASS_CUT_RAMP_S = 0.05; // quick but click-free transition
 
-let bassCutEnabled = false; // room-wide synced setting - see applyBassCutEnabled
-let bassCutFilter = null;
-
-function ensureBassCutFilter() {
-  if (!bassCutFilter) {
-    const ctx = ensureAudioContext();
-    bassCutFilter = ctx.createBiquadFilter();
-    bassCutFilter.type = "highpass";
-    bassCutFilter.Q.value = 0.707; // flat (Butterworth) response, no resonant peak at the cutoff
-    bassCutFilter.frequency.value = bassCutEnabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
-    bassCutFilter.connect(ctx.destination);
-  }
-  return bassCutFilter;
-}
-
-/// Maps a `performance.now()`-domain millisecond timestamp onto this
-/// AudioContext's `currentTime` timeline, using a fresh output-timestamp
-/// sample as the anchor between the two monotonic clocks.
-function performanceMsToAudioContextTime(targetPerformanceMs) {
-  const ts = audioCtx.getOutputTimestamp();
-  const anchorPerformanceMs = ts.performanceTime ?? performance.now();
-  const anchorContextTime = ts.contextTime ?? audioCtx.currentTime;
-  return anchorContextTime + (targetPerformanceMs - anchorPerformanceMs) / 1000;
-}
-
-/// The position the currently-sounding source is actually at right now,
-/// derived purely from the AudioContext's own sample clock - not from any
-/// server-time estimate. Null while nothing is actually sounding yet (source
-/// stopped, or its scheduled start time hasn't arrived).
-///
-/// Deliberately uses raw audioCtx.currentTime rather than
-/// getOutputTimestamp() - the latter's accuracy (how well its reported
-/// output latency matches the browser's real audible delay) turned out to
-/// vary wildly across engines (accurate on Chrome, apparently stale/wrong on
-/// Firefox), making it a poor cross-browser basis for this measurement. Any
-/// fixed per-browser bias this introduces is instead calibrated out
-/// empirically, once per session - see driftCalibrationOffsetUs below.
-function currentAudioPositionUs() {
-  if (!currentSource || !currentSourceStart || !audioCtx) return null;
-  const elapsedSinceStartS = Math.max(0, audioCtx.currentTime - currentSourceStart.contextTime);
-  const raw = currentSourceStart.positionUs + elapsedSinceStartS * 1e6 * currentSourceRate;
-  return wrapPositionWithLoop(raw, currentSourceStart.positionUs);
-}
-
-// ---- server clock estimation --------------------------------------------
+// ---- server clock estimation (shared - one server, one clock) ------------
 
 const INITIAL_SYNC_SAMPLE_COUNT = 8;
 const PERIODIC_RESYNC_SAMPLE_COUNT = 5;
@@ -407,90 +398,7 @@ function stopPeriodicResync() {
   }
 }
 
-// ---- transport model -----------------------------------------------------
-
-let connectionId = null;
-let lastAppliedRevision = -1;
-let transport = { playing: false, anchor_position_us: 0, anchor_server_time_us: 0, playback_rate: 1.0 };
-
-function currentModelPositionUs(nowServerUs) {
-  if (!transport.playing) return transport.anchor_position_us;
-  const elapsed = Math.max(0, nowServerUs - transport.anchor_server_time_us);
-  const raw = transport.anchor_position_us + elapsed * transport.playback_rate;
-  return wrapPositionWithLoop(raw, transport.anchor_position_us);
-}
-
-// ---- cue point -------------------------------------------------------------
-//
-// Room-wide synced, like play/pause/seek (not a local-only setting): every
-// connected client agrees on where the single cue point is, and pressing or
-// holding Cue is audible to the whole room, same as any other transport
-// action - see set_cue_point/cue_point_changed and the cue_release
-// transport action in the server protocol.
-let cuePointUs = null; // null until a cue point has ever been set this session
-let cuePreviewActive = false; // true between pointerdown and pointerup while holding Cue at the cue point
-
-/// The Cue button is disabled while playing with no cue point set yet
-/// (nothing to jump to) - otherwise enabled whenever connected, since every
-/// other state (paused anywhere, paused at the cue point, playing with a
-/// cue point) has a defined action.
-function updateCueButtonUi() {
-  const btn = document.getElementById("cue-btn");
-  const connected = ws && ws.readyState === WebSocket.OPEN;
-  btn.disabled = !connected || (transport.playing && cuePointUs === null);
-}
-
-// ---- loop region ------------------------------------------------------------
-//
-// Room-wide synced, like the cue point above. "active" means "primed to
-// wrap back to start once playback reaches end" - not "currently playing".
-// Looping itself is a property of the position formulas below
-// (wrapPositionWithLoop), not a discrete "seek back" event any one client
-// fires: every client (and the server - see RoomState::position_at_with_loop)
-// derives the identical wrapped position from the same anchor/rate/loop
-// state, so there's no race to coordinate and no extra network traffic.
-// The actual audible loop instead uses the native
-// AudioBufferSourceNode.loop/loopStart/loopEnd (sample-accurate, no JS
-// involved in the wrap itself) - see scheduleAudioAction.
-let loopRegion = null; // {start_us, end_us, active} | null - null until a loop has ever been inserted this session
-
-const LOOP_BEAT_COUNT = 16;
-// The loop's active/inactive colors live in waveform.js (where the region
-// is actually rendered), not here - there's no cross-script constant
-// sharing set up, so a copy here would be dead code that looks load-bearing
-// but silently does nothing if edited.
-
-/// Wraps `rawPositionUs` into the active loop's bounds if one exists and
-/// `anchorPositionUs` (the position this raw value was computed FROM) sits
-/// at or before the loop's end. Mirrors RoomState::position_at_with_loop
-/// server-side exactly, including the same guard against "snapping back" a
-/// position that was placed past the loop by an explicit seek/restart/
-/// cue-release rather than reached by continuous playback through it.
-function wrapPositionWithLoop(rawPositionUs, anchorPositionUs) {
-  if (!loopRegion || !loopRegion.active || loopRegion.end_us <= loopRegion.start_us) return rawPositionUs;
-  if (anchorPositionUs >= loopRegion.end_us || rawPositionUs < loopRegion.end_us) return rawPositionUs;
-  const loopLenUs = loopRegion.end_us - loopRegion.start_us;
-  const offsetUs = (rawPositionUs - loopRegion.start_us) % loopLenUs;
-  return loopRegion.start_us + offsetUs;
-}
-
-/// The Loop button is disabled until a BPM has been detected (no bpm, no
-/// way to compute "16 beats") - otherwise always enabled, since both of its
-/// behaviors (insert-new-loop, deactivate-loop-at-playhead) are valid in
-/// any other state.
-function updateLoopButtonUi() {
-  const btn = document.getElementById("loop-btn");
-  const connected = ws && ws.readyState === WebSocket.OPEN;
-  btn.disabled = !connected || detectedBaseBpm === null;
-}
-
-/// Reloop/exit is disabled whenever no loop has ever been inserted - both
-/// its behaviors (activate, deactivate) require an existing loop to act on.
-function updateReloopButtonUi() {
-  const btn = document.getElementById("reloop-btn");
-  const connected = ws && ws.readyState === WebSocket.OPEN;
-  btn.disabled = !connected || loopRegion === null;
-}
+// ---- misc shared helpers ---------------------------------------------------
 
 /// Displays a playback_rate (0.94-1.06, where 1.0 is "no change") as a
 /// signed offset from 0% rather than an absolute percentage - the slider
@@ -503,8 +411,6 @@ function formatTempoPercent(rate) {
   return `${sign}${percent.toFixed(1)}%`;
 }
 
-// ---- cookies (local-only settings) ----------------------------------------
-
 function getCookie(name) {
   const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
   return match ? decodeURIComponent(match[1]) : null;
@@ -515,46 +421,10 @@ function setCookie(name, value, days = 365) {
   document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
 }
 
-// ---- BPM detection (background worker) -----------------------------------
-//
-// Detection itself runs against the *nominal* (0% tempo) track and never
-// touches the tempo slider at all - detectedBaseBpm is that one-time,
-// rate-independent result. Whenever the effective tempo changes (locally or
-// via a synced remote event), the *displayed* BPM is just recomputed as
-// detectedBaseBpm * rate - a naive linear scale, not a fresh detection pass,
-// per the request that drove this section.
-//
-// detectedBaseBpm is deliberately a plain top-level variable (not tucked
-// inside a closure) so it's trivially reachable from anywhere else in this
-// script, or from a `page.evaluate` in a test - other code that needs "the
-// current BPM" should prefer the currentBpm() helper below, which already
-// folds in the tempo scaling.
-let detectedBaseBpm = null;
-let bpmWorker = null;
-
-// Which library performs the detection - a local-only setting (not synced
-// room-wide, like driftCalibrationEnabled: this is a per-browser preference
-// about which analysis to trust/compare, not something the room needs to
-// agree on), remembered across visits via a cookie rather than re-defaulting
-// every page load.
-let bpmEngine = getCookie("bpm_engine") || "wabd";
-
-/// The tempo-adjusted BPM right now, or null if nothing's been detected yet
-/// (see detectedBaseBpm). This is the single source of truth other code
-/// should call rather than re-deriving the same multiplication elsewhere.
-function currentBpm() {
-  return detectedBaseBpm === null ? null : detectedBaseBpm * transport.playback_rate;
-}
-
-function updateBpmDisplay(rate) {
-  const el = document.getElementById("bpm-readout");
-  el.textContent = detectedBaseBpm === null ? "--" : (detectedBaseBpm * rate).toFixed(1);
-  updateLoopButtonUi(); // the Loop button's enablement depends on detectedBaseBpm, which always changes alongside this display
-}
-
 /// BeatDetect.js's own analysis constants (public/vendor/beatdetect/BeatDetect.js)
 /// - see bpm-worker.js's header for why the actual number-crunching is a
-/// ported copy running in a Worker rather than the library itself.
+/// ported copy running in a Worker rather than the library itself. Shared
+/// constants, but each deck runs its own detection pass with its own worker.
 const BPM_ANALYSIS_SAMPLE_RATE = 44100; // BeatDetect.js always analyses at this rate regardless of the source file's own rate - OfflineAudioContext resamples automatically
 const BPM_LOW_PASS_FREQ = 150;
 const BPM_HIGH_PASS_FREQ = 100;
@@ -562,103 +432,7 @@ const BPM_RANGE = [90, 180];
 const BPM_TIME_SIGNATURE = 4;
 const BPM_FLOAT_PRECISION = 4;
 
-/// Dispatches to whichever engine bpm-engine-select currently has selected.
-/// Both branches converge on the same detectedBaseBpm/updateBpmDisplay - the
-/// engine choice only affects how the number gets computed, never how it's
-/// displayed or used afterwards (see currentBpm()).
-async function startBpmDetection(buffer) {
-  if (bpmEngine === "wabd") {
-    detectedBaseBpm = null;
-    updateBpmDisplay(transport.playback_rate);
-    try {
-      detectedBaseBpm = await window.detectBpmWithWabd(buffer);
-      updateBpmDisplay(transport.playback_rate);
-      log(`BPM detected (web-audio-beat-detector): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
-    } catch (err) {
-      log(`BPM detection failed (web-audio-beat-detector): ${err.message ?? err}`);
-    }
-    return;
-  }
-  await startBeatDetectJsDetection(buffer);
-}
-
-/// Renders `buffer` through the same low-pass/high-pass filter chain
-/// BeatDetect.js's _buildOfflineCtx uses (isolating kick-drum-range
-/// transients), then hands the rendered PCM to the background worker for
-/// the actual peak/interval analysis. Reuses the file this app already
-/// decoded for playback (`audioBuffer`) instead of BeatDetect.js's own
-/// fetch+decode path, since we already have it.
-async function startBeatDetectJsDetection(buffer) {
-  detectedBaseBpm = null;
-  updateBpmDisplay(transport.playback_rate);
-
-  const offlineCtx = new OfflineAudioContext(2, buffer.duration * BPM_ANALYSIS_SAMPLE_RATE, BPM_ANALYSIS_SAMPLE_RATE);
-  const source = offlineCtx.createBufferSource();
-  source.buffer = buffer;
-  const lowpass = offlineCtx.createBiquadFilter();
-  lowpass.type = "lowpass";
-  lowpass.frequency.value = BPM_LOW_PASS_FREQ;
-  lowpass.Q.value = 1;
-  const highpass = offlineCtx.createBiquadFilter();
-  highpass.type = "highpass";
-  highpass.frequency.value = BPM_HIGH_PASS_FREQ;
-  highpass.Q.value = 1;
-  source.connect(lowpass);
-  lowpass.connect(highpass);
-  highpass.connect(offlineCtx.destination);
-  source.start(0);
-
-  let rendered;
-  try {
-    rendered = await offlineCtx.startRendering();
-  } catch (err) {
-    log(`BPM detection failed (BeatDetect.js): could not render offline context: ${err.message ?? err}`);
-    return;
-  }
-
-  // Copy into fresh, independently-owned buffers before transferring - the
-  // Float32Arrays getChannelData() returns are views into memory the
-  // rendered AudioBuffer still owns, not safe to hand over as Transferable.
-  const dataL = rendered.getChannelData(0).slice();
-  const dataR = rendered.getChannelData(1).slice();
-
-  if (!bpmWorker) bpmWorker = new Worker("bpm-worker.js");
-  bpmWorker.onmessage = (e) => {
-    if (e.data.error) {
-      log(`BPM detection failed (BeatDetect.js): ${e.data.error}`);
-      return;
-    }
-    detectedBaseBpm = e.data.bpm;
-    updateBpmDisplay(transport.playback_rate);
-    log(`BPM detected (BeatDetect.js): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
-  };
-  bpmWorker.postMessage(
-    {
-      dataL,
-      dataR,
-      sampleRate: BPM_ANALYSIS_SAMPLE_RATE,
-      bpmRange: BPM_RANGE,
-      timeSignature: BPM_TIME_SIGNATURE,
-      round: false,
-      float: BPM_FLOAT_PRECISION,
-    },
-    [dataL.buffer, dataR.buffer]
-  );
-}
-
-function setStatusUi() {
-  const statusEl = document.getElementById("transport-status");
-  statusEl.textContent = transport.playing ? "playing" : "paused";
-  statusEl.className = transport.playing ? "playing" : "paused";
-  document.getElementById("m-revision").textContent = lastAppliedRevision;
-
-  document.getElementById("tempo-slider").value = transport.playback_rate;
-  document.getElementById("tempo-readout").textContent = formatTempoPercent(transport.playback_rate);
-  updateBpmDisplay(transport.playback_rate);
-  updateCueButtonUi();
-}
-
-// ---- playback drift correction (tempo nudge) -----------------------------
+// ---- playback drift correction (tempo nudge) - shared constants ----------
 //
 // Sized from real observed numbers: three clients showed live playback drift
 // (audio - model) of roughly 35000±3000us, 1000±2000us and 0±2000us - so the
@@ -678,234 +452,16 @@ const NUDGE_RAMP_S = 0.3; // time to ramp the AudioParam in/out, avoids an audib
 // effectively constant for the life of a page (same browser, same audio
 // pipeline), so rather than let the generic small nudge rediscover and
 // slowly (~50s) crawl toward the same number after every single play/pause,
-// we measure it ONCE per session (driftCalibrationOffsetUs, below -
-// deliberately NOT reset per playback segment) over DRIFT_CALIBRATION_DURATION_S,
-// apply it as a real one-time fast correction (see
-// startFastCalibrationCorrection), and from then on bake the known offset
-// directly into the scheduling of every later segment (see
-// scheduleAudioAction) so new segments start already in sync - no further
-// correction needed. The gentle nudge below still runs continuously on the
-// calibrated residual, as a safety net for genuine ongoing drift.
-//
-// That measurement window usually runs against a silent background probe
-// (runDriftCalibrationProbe) as soon as the browser's autoplay policy allows
-// it - well before the user's first real Play click, in the common case - so
-// the fast-correction burst above typically never has to touch real audio at
-// all. If the user presses Play before the probe finishes, a real playback
-// segment's own measurement (in tick(), via the same recordDriftCalibrationSample
-// helper) picks up wherever the probe left off instead of starting over.
+// each deck measures it ONCE per session (see createDeck's
+// driftCalibrationOffsetUs, deliberately NOT reset per playback segment)
+// over DRIFT_CALIBRATION_DURATION_S, applies it as a real one-time fast
+// correction, and from then on bakes the known offset directly into the
+// scheduling of every later segment so new segments start already in sync.
 const DRIFT_CALIBRATION_DURATION_S = 1.5;
 const FAST_CALIBRATION_MAX_RATE_DELTA = 0.03; // up to +/-3%: audible but brief, sized to close a KNOWN gap in a few seconds rather than the gentle nudge's ~50s
-const AUDIO_CONTEXT_WARMUP_MS = 300; // see runDriftCalibrationProbe - a just-created context's getOutputTimestamp() isn't meaningful yet
+const AUDIO_CONTEXT_WARMUP_MS = 300; // see createDeck's runDriftCalibrationProbe - a just-created context's getOutputTimestamp() isn't meaningful yet
 
-let smoothedDriftUs = null; // EMA of live drift; the nudge controller's input
-let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
-
-// Local-only setting (not synced room-wide, unlike nudgeEnabled) - this
-// compensates a per-browser/per-pipeline artifact, not a room-wide
-// preference, so there's nothing to agree on across clients.
-let driftCalibrationEnabled = true;
-
-let driftCalibrationOffsetUs = null; // learned once per session/arm-cycle, reused across every subsequent playback segment
-let driftCalibrationSumUs = 0; // accumulator during the calibration window
-let driftCalibrationSampleCount = 0;
-let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the current measuring window began; null = not currently measuring
-
-let fastCalibrationCorrectionActive = false; // true while the one-time post-calibration rate burst is running
-let fastCalibrationCorrectionEndCtxTime = null;
-
-let driftCalibrationProbeStarted = false; // guards against starting the background probe more than once per arm-cycle
-
-// Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed
-// (see websocket section) rather than a purely local UI toggle - every
-// connected client should agree on whether correction is active.
-let nudgeEnabled = true;
-
-/// Changes currentSource's actual playback rate, ramping smoothly rather than
-/// stepping, and rebases currentSourceStart so currentAudioPositionUs() stays
-/// correct across the rate change (see currentSourceRate above). Defaults to
-/// ramping starting right now (used by the local, unsynced nudge corrector);
-/// pass `atContextTime` to hold the current rate until a future scheduled
-/// moment instead (used by synced tempo changes, so all clients change
-/// speed at approximately the same instant).
-///
-/// Also drives the pitch-shift node's correction in exact lockstep (same
-/// ramp timing, inverse value) so pitch stays locked to the 0%-tempo pitch
-/// through every rate change this function ever makes, tempo or nudge alike.
-function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
-  if (!currentSource || !currentSourceStart || !audioCtx) return;
-  const targetCtxTime = atContextTime ?? audioCtx.currentTime;
-  // Position at the target time, computed under the OLD rate, before we
-  // overwrite currentSourceStart/currentSourceRate below. Loop-wrapped (see
-  // wrapPositionWithLoop) so a rebase that happens to land past an active
-  // loop's end doesn't bake an un-wrapped anchor into currentSourceStart -
-  // every future currentAudioPositionUs() call assumes that anchor is
-  // already loop-consistent.
-  const elapsedToTargetS = Math.max(0, targetCtxTime - currentSourceStart.contextTime);
-  const rawPositionAtTargetUs = currentSourceStart.positionUs + elapsedToTargetS * 1e6 * currentSourceRate;
-  const positionAtTargetUs = wrapPositionWithLoop(rawPositionAtTargetUs, currentSourceStart.positionUs);
-
-  currentSourceStart = { contextTime: targetCtxTime, positionUs: positionAtTargetUs };
-  currentSourceRate = newRate;
-
-  const rampStartCtxTime = Math.max(audioCtx.currentTime, targetCtxTime);
-
-  const rateParam = currentSource.playbackRate;
-  rateParam.cancelScheduledValues(audioCtx.currentTime);
-  rateParam.setValueAtTime(rateParam.value, audioCtx.currentTime); // pin current value, discard any pending automation
-  rateParam.setValueAtTime(rateParam.value, rampStartCtxTime); // hold until the target time (a no-op if that's "now")
-  rateParam.linearRampToValueAtTime(newRate, rampStartCtxTime + rampDurationS);
-
-  if (pitchShiftNode) {
-    const pitchParam = pitchShiftNode.parameters.get("pitchRatio");
-    const pitchTarget = computePitchTarget(newRate);
-    pitchParam.cancelScheduledValues(audioCtx.currentTime);
-    pitchParam.setValueAtTime(pitchParam.value, audioCtx.currentTime);
-    pitchParam.setValueAtTime(pitchParam.value, rampStartCtxTime);
-    pitchParam.linearRampToValueAtTime(pitchTarget, rampStartCtxTime + rampDurationS);
-  }
-}
-
-function updateNudgeUi() {
-  const el = document.getElementById("m-nudge");
-  if (!nudgeEnabled) el.textContent = "disabled";
-  else if (nudgeDirection === 0) el.textContent = "off";
-  else el.textContent = `${nudgeDirection > 0 ? "speeding up" : "slowing down"} (rate ${currentSourceRate.toFixed(4)})`;
-}
-
-function disengageNudge(reason) {
-  if (nudgeDirection === 0) return;
-  setSourceRate(transport.playback_rate);
-  nudgeDirection = 0;
-  updateNudgeUi();
-  log(`nudge disengaged${reason ? `: ${reason}` : ""}`);
-}
-
-/// Applies a real, one-time rate correction sized to close the just-measured
-/// driftCalibrationOffsetUs in a few seconds, instead of leaving the small
-/// generic nudge (NUDGE_RATE_DELTA) to rediscover and crawl toward the same
-/// number over ~50s. This is a genuine playback-rate change (like the nudge
-/// itself), not a display adjustment - it's the only way to actually correct
-/// real audible timing after a source has already started (see the
-/// conversation that led here: a calibration offset that's merely subtracted
-/// from the nudge's *input* changes what the corrector believes, not what
-/// the listener hears).
-function startFastCalibrationCorrection() {
-  if (driftCalibrationOffsetUs === null || Math.abs(driftCalibrationOffsetUs) < NUDGE_ENGAGE_THRESHOLD_US) {
-    return; // negligible - nothing worth correcting
-  }
-  const offsetS = driftCalibrationOffsetUs / 1e6;
-  const durationS = Math.abs(offsetS) / FAST_CALIBRATION_MAX_RATE_DELTA;
-  const rateDelta = offsetS > 0 ? -FAST_CALIBRATION_MAX_RATE_DELTA : FAST_CALIBRATION_MAX_RATE_DELTA; // ahead -> slow down, same convention as updateNudge
-  fastCalibrationCorrectionActive = true;
-  fastCalibrationCorrectionEndCtxTime = audioCtx.currentTime + durationS;
-  const targetRate = transport.playback_rate * (1 + rateDelta);
-  setSourceRate(targetRate, undefined, Math.min(NUDGE_RAMP_S, durationS));
-  log(`fast drift-calibration correction engaged: rate -> ${targetRate.toFixed(4)} for ${durationS.toFixed(2)}s (closing known ${Math.round(driftCalibrationOffsetUs)}us gap)`);
-}
-
-/// Feeds one drift sample into the session's shared calibration accumulator.
-/// Called both by a real playback segment's own measurement (tick(), below)
-/// and by the background silent probe (runDriftCalibrationProbe) - both are
-/// measuring the exact same underlying quantity (this AudioContext's fixed
-/// scheduling bias), just via different vehicles, so pooling whichever is
-/// active into one running average is valid, and if they happen to overlap,
-/// is strictly better (more samples, same true value). Returns true once
-/// calibration has just completed on this call.
-function recordDriftCalibrationSample(rawDriftUs) {
-  if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
-  const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
-  if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
-    driftCalibrationSumUs += rawDriftUs;
-    driftCalibrationSampleCount += 1;
-    return false;
-  }
-  driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
-  log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
-  startFastCalibrationCorrection(); // a no-op if nothing is actually playing yet - see setSourceRate's guard
-  return true;
-}
-
-/// Learns this session's fixed calibration offset using a silent, throwaway
-/// buffer instead of waiting for the user's first real Play click - so by
-/// the time they actually press Play, the offset is usually already known
-/// and no audible fast-correction burst ever touches their real content.
-/// Runs entirely locally (performance.now() vs this AudioContext's own
-/// clock) - no server clock needed, since this never has to agree with
-/// other clients, only measure this browser's own pipeline. Connects
-/// straight to destination rather than through pitchNode/bassCutFilter:
-/// neither adds causal sample delay (the pitch-shift bypass path was
-/// verified bit-exact, and a BiquadFilterNode is a zero-lookahead IIR
-/// filter), so they can't affect the measured bias either way, and skipping
-/// them keeps this probe fully independent of the real transport's nodes.
-function runDriftCalibrationProbe() {
-  if (driftCalibrationProbeStarted || !driftCalibrationEnabled || driftCalibrationOffsetUs !== null) return;
-  driftCalibrationProbeStarted = true;
-
-  const ctx = ensureAudioContext();
-  const probeDurationS = DRIFT_CALIBRATION_DURATION_S + 1.0;
-  const silentBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * probeDurationS), ctx.sampleRate); // zero-initialized by spec - genuinely silent
-
-  // A brand-new AudioContext's getOutputTimestamp() correlation isn't
-  // meaningful yet in the instant after creation (the audio thread hasn't
-  // started rendering real output). Every other call site that relies on it
-  // (performanceMsToAudioContextTime, via scheduleAudioAction) only ever
-  // runs well after ensureAudioContext() - seconds later, after a file
-  // loads and/or clock sync completes - so it never hit this. This probe is
-  // the first thing to use a context that might be milliseconds old, so
-  // give it a moment to actually start up first.
-  setTimeout(() => {
-    const leadMs = 150; // mirrors the server's schedule_lead_time_us convention
-    const targetPerfMs = performance.now() + leadMs;
-    const startAt = performanceMsToAudioContextTime(targetPerfMs);
-
-    const source = ctx.createBufferSource();
-    source.buffer = silentBuffer;
-    source.connect(ctx.destination);
-    source.start(startAt, 0);
-    log("background drift-calibration probe started (silent, local-only)");
-
-    const intervalId = setInterval(() => {
-      if (driftCalibrationOffsetUs !== null) {
-        // Finished via some other path (e.g. the user already pressed Play
-        // and a real segment's own measurement got there first) - stop.
-        clearInterval(intervalId);
-        try { source.stop(); } catch (_) { /* already stopped */ }
-        return;
-      }
-      const elapsedSinceStartS = Math.max(0, ctx.currentTime - startAt);
-      const probePositionUs = elapsedSinceStartS * 1e6;
-      const expectedPositionUs = Math.max(0, performance.now() - targetPerfMs) * 1000;
-      const rawDriftUs = probePositionUs - expectedPositionUs;
-      if (recordDriftCalibrationSample(rawDriftUs)) {
-        clearInterval(intervalId);
-        try { source.stop(); } catch (_) { /* already stopped */ }
-      }
-    }, 50);
-  }, AUDIO_CONTEXT_WARMUP_MS);
-}
-
-/// Bang-bang control with hysteresis: engage a small rate correction once
-/// smoothed drift clears the noise floor, hold it until drift is back near
-/// zero, then release. `audio ahead of model` -> slow down; `behind` -> speed up.
-/// The correction is always relative to transport.playback_rate (the
-/// synced tempo setting), not a hardcoded 1.0 - the two compose.
-function updateNudge(driftUs) {
-  if (!nudgeEnabled || driftUs === null) {
-    disengageNudge();
-    return;
-  }
-  if (nudgeDirection === 0 && Math.abs(driftUs) > NUDGE_ENGAGE_THRESHOLD_US) {
-    nudgeDirection = driftUs > 0 ? -1 : 1;
-    setSourceRate(transport.playback_rate * (1 + nudgeDirection * NUDGE_RATE_DELTA));
-    updateNudgeUi();
-    log(`nudge engaged: audio ${driftUs > 0 ? "ahead of" : "behind"} model by ${Math.round(Math.abs(driftUs))}us (smoothed), rate -> ${currentSourceRate.toFixed(4)}`);
-  } else if (nudgeDirection !== 0 && Math.abs(driftUs) < NUDGE_DISENGAGE_THRESHOLD_US) {
-    disengageNudge("drift back within tolerance");
-  }
-}
-
-// ---- tempo control ---------------------------------------------------------
+// ---- tempo control - shared constants --------------------------------------
 //
 // A synced +/-6% tempo slider (must match protocol::{MIN,MAX}_PLAYBACK_RATE
 // server-side), modeled on remote-entity interpolation in networked games:
@@ -913,394 +469,1122 @@ function updateNudge(driftUs) {
 // out at a throttled rate plus a forced final sample on release; remote
 // clients render it from a small delayed/interpolated buffer instead of
 // snapping to each packet, so movement looks continuous even though it's
-// really a series of discrete, possibly-jittery updates. Audio reacts to
-// every accepted sample immediately via a short AudioParam ramp - separate
-// from the visual interpolation, which only affects the slider's rendering.
+// really a series of discrete, possibly-jittery updates.
 const TEMPO_SAMPLE_INTERVAL_MS = 40; // throttle: how often to send while dragging (requested range: 25-50ms)
 const TEMPO_INTERPOLATION_DELAY_US = 90_000; // render this far behind estimated server time (requested range: 75-100ms)
 const TEMPO_SAMPLE_RAMP_S = 0.08; // audio ramp per sample - short enough to track a fast drag, long enough to avoid a click
 
-let isDraggingLocally = false; // true while THIS client owns the fader; local rendering bypasses the buffer entirely
-let tempoSampleBuffer = []; // [{serverTimeUs, value, revision}], ascending by serverTimeUs - remote render input only
+const PLAYBACK_DRIFT_LOG_INTERVAL_MS = 5_000;
 
-let lastTempoSampleSentAtMs = -Infinity;
-let tempoSamplesSentInWindow = 0; // reset every 1s by the diagnostic interval below
-let lastTempoSampleReceivedAtMs = null;
-let tempoDiscardedStaleCount = 0;
-let pendingLocalTempoRelease = null; // {value, sentAtMs} - sender-side round-trip diagnostic for the forced final send
+// Buttons/checkboxes whose enabled state tracks the websocket connection,
+// per deck (see createDeck's onOpen/onClose).
+const PER_DECK_CONNECTION_TOGGLE_IDS = [
+  "play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn",
+  "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox",
+  "pitch-lock-checkbox", "drift-calibration-checkbox",
+];
 
-/// Throttled send: at most one message per TEMPO_SAMPLE_INTERVAL_MS unless
-/// `force` (used for the release/change-completion sample, which must go out
-/// immediately regardless of how recently we last sent).
-function sendTempoSample(rate, force) {
-  const nowMs = performance.now();
-  if (!force && nowMs - lastTempoSampleSentAtMs < TEMPO_SAMPLE_INTERVAL_MS) return;
-  lastTempoSampleSentAtMs = nowMs;
-  tempoSamplesSentInWindow++;
-  ws.send(JSON.stringify({ type: "set_tempo_request", request_id: `request-${randomId()}`, playback_rate: rate }));
-  if (force) pendingLocalTempoRelease = { value: rate, sentAtMs: nowMs };
-}
+// ---- one independent DJ deck -----------------------------------------------
+//
+// Everything below is per-deck state: its own audio graph (source, pitch
+// shift node, bass-cut filter), its own transport/cue/loop model, its own
+// drift calibration and tempo-nudge corrector, its own BPM detection worker.
+// Two instances are created below (deck A, deck B), sharing only the single
+// AudioContext/pitch-worklet registration and the websocket connection.
+function createDeck(deckId) {
+  const label = deckId === "a" ? "Deck A" : "Deck B";
 
-/// Audio reacts to every accepted sample right away, ramped smoothly and
-/// composed with any active local nudge correction - independent of however
-/// delayed the *visual* slider rendering is.
-function scheduleTempoAudioRamp(baseRate) {
-  if (!currentSource || !currentSourceStart || !audioCtx) return;
-  const targetRate = baseRate * (nudgeDirection === 0 ? 1 : 1 + nudgeDirection * NUDGE_RATE_DELTA);
-  setSourceRate(targetRate, undefined, TEMPO_SAMPLE_RAMP_S);
-}
-
-/// Applies an accepted tempo sample: updates the authoritative model and
-/// audio immediately (both react in real time), but only *queues* the value
-/// for the delayed/interpolated visual render - see renderTempoFader().
-function applyTempoSample(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    tempoDiscardedStaleCount++;
-    document.getElementById("m-tempo-discarded").textContent = tempoDiscardedStaleCount;
-    log(`discarded stale tempo sample (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
-  }
-  lastAppliedRevision = msg.revision;
-  document.getElementById("m-revision").textContent = lastAppliedRevision;
-
-  const nowMs = performance.now();
-  if (lastTempoSampleReceivedAtMs !== null) {
-    document.getElementById("m-tempo-interval").textContent = (nowMs - lastTempoSampleReceivedAtMs).toFixed(1);
-  }
-  lastTempoSampleReceivedAtMs = nowMs;
-
-  transport = { ...transport, playback_rate: msg.playback_rate, anchor_position_us: msg.position_us, anchor_server_time_us: msg.effective_server_time_us };
-  tempoSampleBuffer.push({ serverTimeUs: msg.effective_server_time_us, value: msg.playback_rate, revision: msg.revision });
-  scheduleTempoAudioRamp(msg.playback_rate);
-
-  if (msg.origin_connection_id === connectionId && pendingLocalTempoRelease && Math.abs(msg.playback_rate - pendingLocalTempoRelease.value) < 1e-9) {
-    const roundTripMs = nowMs - pendingLocalTempoRelease.sentAtMs;
-    document.getElementById("m-tempo-release-rtt").textContent = roundTripMs.toFixed(1);
-    log(`tempo release round-trip: ${roundTripMs.toFixed(1)}ms`);
-    pendingLocalTempoRelease = null;
-  }
-}
-
-/// Drops buffered samples we'll never need again - anything before the most
-/// recent one at or before `renderTimeUs`, since render time only moves
-/// forward. Keeps the buffer small (typically 2-3 entries at these rates).
-function trimTempoSampleBuffer(renderTimeUs) {
-  let cut = 0;
-  for (let i = 0; i < tempoSampleBuffer.length - 1; i++) {
-    if (tempoSampleBuffer[i + 1].serverTimeUs <= renderTimeUs) cut = i + 1;
-    else break;
-  }
-  if (cut > 0) tempoSampleBuffer.splice(0, cut);
-}
-
-/// Renders the remote tempo fader from the interpolation buffer: finds the
-/// two samples surrounding `renderTimeUs` and linearly interpolates between
-/// them. Falls back to holding the nearest known value when there's no pair
-/// to interpolate between yet (requirement: hold, don't jump/freeze-then-snap).
-function renderTempoFader() {
-  if (isDraggingLocally) return; // local input owns the DOM value while dragging
-  const nowServerUs = estimateServerTimeUs();
-  if (nowServerUs === null) return;
-  const renderTimeUs = nowServerUs - TEMPO_INTERPOLATION_DELAY_US;
-
-  let prev = null;
-  let next = null;
-  for (const sample of tempoSampleBuffer) {
-    if (sample.serverTimeUs <= renderTimeUs) prev = sample;
-    else { next = sample; break; }
+  /// Shadows the top-level log() so every message from this deck is
+  /// automatically tagged - every call site inside this factory that says
+  /// `log(...)` picks this up without needing its own prefix.
+  function log(message) {
+    window.__sharedLog(`[${label}] ${message}`);
   }
 
-  let displayValue;
-  if (prev && next) {
-    const span = next.serverTimeUs - prev.serverTimeUs;
-    const frac = span > 0 ? Math.min(1, Math.max(0, (renderTimeUs - prev.serverTimeUs) / span)) : 1;
-    displayValue = prev.value + (next.value - prev.value) * frac;
-  } else if (prev) {
-    displayValue = prev.value; // no newer sample yet - hold rather than jump
-  } else if (next) {
-    displayValue = next.value; // cold start: render time is before our earliest sample
-  } else {
-    return; // nothing buffered at all yet
+  function el(name) {
+    return document.getElementById(`${name}-${deckId}`);
   }
 
-  document.getElementById("tempo-slider").value = displayValue;
-  document.getElementById("tempo-readout").textContent = formatTempoPercent(displayValue);
-  updateBpmDisplay(displayValue);
-  trimTempoSampleBuffer(renderTimeUs);
-}
+  // ---- audio (per-deck source/effects chain) -------------------------------
 
-/// Schedules (or, if already due, immediately executes) a play/pause/restart
-/// transition against the local Web Audio clock. `willBePlaying` is the
-/// model's playing state *after* this event (already updated by the caller),
-/// which is what actually decides whether audio should be sounding - the
-/// action name alone doesn't, since "restart" keeps whatever it was.
-function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePlaying) {
-  const nowServerUs = estimateServerTimeUs();
-  const lateByUs = nowServerUs === null ? 0 : nowServerUs - effectiveServerTimeUs;
-  document.getElementById("m-scheduled").textContent = Math.round(effectiveServerTimeUs);
+  let audioBuffer = null;
+  let currentSource = null; // the AudioBufferSourceNode currently scheduled/playing
 
-  const targetLocalMs = performance.now() + (effectiveServerTimeUs - nowServerUs) / 1000;
-  const measureFire = () => {
-    const actualServerUs = estimateServerTimeUs();
-    const errorUs = actualServerUs - effectiveServerTimeUs;
-    document.getElementById("m-actual").textContent = Math.round(actualServerUs);
-    document.getElementById("m-error").textContent = Math.round(errorUs);
-    log(`${action} executed; scheduling error ${Math.round(errorUs)}us`);
-  };
+  // Where and when the *current* source actually starts sounding, in the
+  // AudioContext's own clock - the ground truth for what's audible, as
+  // opposed to `transport`'s server-time-derived model of where playback
+  // should be. Comparing the two is what lets us measure real playback
+  // drift instead of just JS-timer scheduling jitter.
+  let currentSourceStart = null; // {contextTime, positionUs}
 
-  if (!audioBuffer) {
-    // No audio loaded yet: still track the model/measurements, just skip
-    // driving a real AudioBufferSourceNode.
-    if (lateByUs > 0) {
-      log(`late ${action} event by ${Math.round(lateByUs)}us (no audio loaded, model-only)`);
-      measureFire();
-    } else {
-      setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
+  // The actual playbackRate currently applied to currentSource. Normally
+  // equal to transport.playback_rate (1.0), but a tempo nudge (see below)
+  // can pull it slightly off that to correct local drift - a purely local
+  // correction the server/model never knows about.
+  let currentSourceRate = 1.0;
+
+  // Synced room-wide, like nudge_enabled/bass_cut_enabled - see
+  // set_pitch_lock_enabled/pitch_lock_setting_changed in the websocket
+  // section.
+  let pitchLockEnabled = true;
+  let pitchShiftNode = null;
+
+  function isTempoAtZero() {
+    return Math.abs(transport.playback_rate - 1.0) < TEMPO_ZERO_EPSILON;
+  }
+
+  /// The pitchRatio to send the pitch node for a given fully-composed source
+  /// rate (tempo * nudge factor) - 1.0 (no correction) whenever pitch-lock is
+  /// off or tempo is at 0%, otherwise the inverse of the composed rate.
+  function computePitchTarget(composedRate) {
+    if (isTempoAtZero()) return 1.0;
+    return pitchLockEnabled ? 1 / composedRate : 1.0;
+  }
+
+  function ensurePitchShiftNode() {
+    if (pitchWorkletAvailable === false) return null;
+    if (!pitchShiftNode) {
+      const ctx = ensureAudioContext();
+      const channelCount = audioBuffer ? audioBuffer.numberOfChannels : 2;
+      pitchShiftNode = new AudioWorkletNode(ctx, "pitch-shift-processor", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [channelCount],
+      });
+      pitchShiftNode.connect(ensureBassCutFilter());
     }
-    return;
+    return pitchShiftNode;
   }
 
-  const ctx = ensureAudioContext();
+  let bassCutEnabled = false; // room-wide synced setting - see applyBassCutEnabled
+  let bassCutFilter = null;
 
-  if (willBePlaying) {
-    // Covers both "play" and "restart" while already playing: swap in a
-    // fresh source (AudioBufferSourceNode is one-shot) at the given position.
-    if (currentSource) {
-      try { currentSource.stop(); } catch (_) { /* already stopped */ }
+  function ensureBassCutFilter() {
+    if (!bassCutFilter) {
+      const ctx = ensureAudioContext();
+      bassCutFilter = ctx.createBiquadFilter();
+      bassCutFilter.type = "highpass";
+      bassCutFilter.Q.value = 0.707; // flat (Butterworth) response, no resonant peak at the cutoff
+      bassCutFilter.frequency.value = bassCutEnabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
+      bassCutFilter.connect(ctx.destination);
     }
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    const pitchNode = ensurePitchShiftNode(); // null if unavailable (see pitchWorkletAvailable) - fall back to no pitch-lock
-    source.connect(pitchNode || ensureBassCutFilter());
-    source.onended = () => {
-      // Only clear if this is still the active source - a later play/restart
-      // may already have swapped `currentSource` out before this one ends.
-      if (currentSource === source) {
-        currentSource = null;
-        currentSourceStart = null;
-        nudgeDirection = 0;
-        updateNudgeUi();
+    return bassCutFilter;
+  }
+
+  /// The position this deck's currently-sounding source is actually at right
+  /// now, derived purely from the AudioContext's own sample clock - not from
+  /// any server-time estimate. Null while nothing is actually sounding yet.
+  ///
+  /// Deliberately uses raw audioCtx.currentTime rather than
+  /// getOutputTimestamp() - the latter's accuracy varied wildly across
+  /// engines, making it a poor cross-browser basis for this measurement. Any
+  /// fixed per-browser bias this introduces is instead calibrated out
+  /// empirically, once per session - see driftCalibrationOffsetUs below.
+  function currentAudioPositionUs() {
+    if (!currentSource || !currentSourceStart || !audioCtx) return null;
+    const elapsedSinceStartS = Math.max(0, audioCtx.currentTime - currentSourceStart.contextTime);
+    const raw = currentSourceStart.positionUs + elapsedSinceStartS * 1e6 * currentSourceRate;
+    return wrapPositionWithLoop(raw, currentSourceStart.positionUs);
+  }
+
+  // ---- transport model ------------------------------------------------------
+
+  let lastAppliedRevision = -1;
+  let transport = { playing: false, anchor_position_us: 0, anchor_server_time_us: 0, playback_rate: 1.0 };
+
+  function currentModelPositionUs(nowServerUs) {
+    if (!transport.playing) return transport.anchor_position_us;
+    const elapsed = Math.max(0, nowServerUs - transport.anchor_server_time_us);
+    const raw = transport.anchor_position_us + elapsed * transport.playback_rate;
+    return wrapPositionWithLoop(raw, transport.anchor_position_us);
+  }
+
+  // ---- cue point --------------------------------------------------------
+  //
+  // Room-wide synced, like play/pause/seek (not a local-only setting): every
+  // connected client agrees on where this deck's single cue point is.
+  let cuePointUs = null; // null until a cue point has ever been set this session
+  let cuePreviewActive = false; // true between pointerdown and pointerup while holding Cue at the cue point
+
+  /// The Cue button is disabled while playing with no cue point set yet
+  /// (nothing to jump to) - otherwise enabled whenever connected.
+  function updateCueButtonUi() {
+    const btn = el("cue-btn");
+    const connected = ws && ws.readyState === WebSocket.OPEN;
+    btn.disabled = !connected || (transport.playing && cuePointUs === null);
+  }
+
+  // ---- loop region --------------------------------------------------------
+  //
+  // Room-wide synced, like the cue point above. "active" means "primed to
+  // wrap back to start once playback reaches end" - not "currently playing".
+  // Looping itself is a property of the position formulas below
+  // (wrapPositionWithLoop), not a discrete "seek back" event any one client
+  // fires: every client (and the server - see RoomState::position_at_with_loop)
+  // derives the identical wrapped position from the same anchor/rate/loop
+  // state. The actual audible loop instead uses the native
+  // AudioBufferSourceNode.loop/loopStart/loopEnd.
+  let loopRegion = null; // {start_us, end_us, active} | null - null until a loop has ever been inserted this session
+
+  const LOOP_BEAT_COUNT = 16;
+
+  /// Wraps `rawPositionUs` into the active loop's bounds if one exists and
+  /// `anchorPositionUs` (the position this raw value was computed FROM) sits
+  /// at or before the loop's end. Mirrors DeckState::position_at_with_loop
+  /// server-side exactly, including the same guard against "snapping back" a
+  /// position that was placed past the loop by an explicit seek/restart/
+  /// cue-release rather than reached by continuous playback through it.
+  function wrapPositionWithLoop(rawPositionUs, anchorPositionUs) {
+    if (!loopRegion || !loopRegion.active || loopRegion.end_us <= loopRegion.start_us) return rawPositionUs;
+    if (anchorPositionUs >= loopRegion.end_us || rawPositionUs < loopRegion.end_us) return rawPositionUs;
+    const loopLenUs = loopRegion.end_us - loopRegion.start_us;
+    const offsetUs = (rawPositionUs - loopRegion.start_us) % loopLenUs;
+    return loopRegion.start_us + offsetUs;
+  }
+
+  /// The Loop button is disabled until a BPM has been detected (no bpm, no
+  /// way to compute "16 beats") - otherwise always enabled.
+  function updateLoopButtonUi() {
+    const btn = el("loop-btn");
+    const connected = ws && ws.readyState === WebSocket.OPEN;
+    btn.disabled = !connected || detectedBaseBpm === null;
+  }
+
+  /// Reloop/exit is disabled whenever no loop has ever been inserted.
+  function updateReloopButtonUi() {
+    const btn = el("reloop-btn");
+    const connected = ws && ws.readyState === WebSocket.OPEN;
+    btn.disabled = !connected || loopRegion === null;
+  }
+
+  // ---- BPM detection (background worker) -----------------------------------
+  //
+  // Detection itself runs against the *nominal* (0% tempo) track and never
+  // touches the tempo slider at all - detectedBaseBpm is that one-time,
+  // rate-independent result. Whenever the effective tempo changes, the
+  // *displayed* BPM is just recomputed as detectedBaseBpm * rate.
+  let detectedBaseBpm = null;
+  let bpmWorker = null;
+
+  // Which library performs the detection - a local-only setting (per deck,
+  // per browser), remembered across visits via its own cookie key.
+  let bpmEngine = getCookie(`bpm_engine_${deckId}`) || "wabd";
+
+  /// The tempo-adjusted BPM right now, or null if nothing's been detected
+  /// yet. The single source of truth other code should call rather than
+  /// re-deriving the same multiplication elsewhere.
+  function currentBpm() {
+    return detectedBaseBpm === null ? null : detectedBaseBpm * transport.playback_rate;
+  }
+
+  function updateBpmDisplay(rate) {
+    const elm = el("bpm-readout");
+    elm.textContent = detectedBaseBpm === null ? "--" : (detectedBaseBpm * rate).toFixed(1);
+    updateLoopButtonUi(); // the Loop button's enablement depends on detectedBaseBpm, which always changes alongside this display
+  }
+
+  /// Dispatches to whichever engine this deck's bpm-engine-select currently
+  /// has selected. Both branches converge on the same
+  /// detectedBaseBpm/updateBpmDisplay.
+  async function startBpmDetection(buffer) {
+    if (bpmEngine === "wabd") {
+      detectedBaseBpm = null;
+      updateBpmDisplay(transport.playback_rate);
+      try {
+        detectedBaseBpm = await window.detectBpmWithWabd(buffer);
+        updateBpmDisplay(transport.playback_rate);
+        log(`BPM detected (web-audio-beat-detector): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
+      } catch (err) {
+        log(`BPM detection failed (web-audio-beat-detector): ${err.message ?? err}`);
       }
+      return;
+    }
+    await startBeatDetectJsDetection(buffer);
+  }
+
+  /// Renders `buffer` through the same low-pass/high-pass filter chain
+  /// BeatDetect.js's _buildOfflineCtx uses, then hands the rendered PCM to
+  /// this deck's own background worker for the actual peak/interval
+  /// analysis.
+  async function startBeatDetectJsDetection(buffer) {
+    detectedBaseBpm = null;
+    updateBpmDisplay(transport.playback_rate);
+
+    const offlineCtx = new OfflineAudioContext(2, buffer.duration * BPM_ANALYSIS_SAMPLE_RATE, BPM_ANALYSIS_SAMPLE_RATE);
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    const lowpass = offlineCtx.createBiquadFilter();
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = BPM_LOW_PASS_FREQ;
+    lowpass.Q.value = 1;
+    const highpass = offlineCtx.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.frequency.value = BPM_HIGH_PASS_FREQ;
+    highpass.Q.value = 1;
+    source.connect(lowpass);
+    lowpass.connect(highpass);
+    highpass.connect(offlineCtx.destination);
+    source.start(0);
+
+    let rendered;
+    try {
+      rendered = await offlineCtx.startRendering();
+    } catch (err) {
+      log(`BPM detection failed (BeatDetect.js): could not render offline context: ${err.message ?? err}`);
+      return;
+    }
+
+    // Copy into fresh, independently-owned buffers before transferring - the
+    // Float32Arrays getChannelData() returns are views into memory the
+    // rendered AudioBuffer still owns, not safe to hand over as Transferable.
+    const dataL = rendered.getChannelData(0).slice();
+    const dataR = rendered.getChannelData(1).slice();
+
+    if (!bpmWorker) bpmWorker = new Worker("bpm-worker.js");
+    bpmWorker.onmessage = (e) => {
+      if (e.data.error) {
+        log(`BPM detection failed (BeatDetect.js): ${e.data.error}`);
+        return;
+      }
+      detectedBaseBpm = e.data.bpm;
+      updateBpmDisplay(transport.playback_rate);
+      log(`BPM detected (BeatDetect.js): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
     };
-    currentSource = source;
-    applyLoopRegionToCurrentSource(); // start already respecting whatever loop currently exists, if any
-    // Fresh segment: don't inherit a rate/nudge/smoothing state that belonged
-    // to whatever was playing before (e.g. right after a restart, drift and
-    // any active correction from the pre-restart segment are meaningless).
-    currentSourceRate = transport.playback_rate;
-    // The fix this depends on: a brand new AudioParam defaults to 1.0, so
-    // without explicitly writing it here, a source created after a tempo
-    // change had already persisted (e.g. pause at 1.06x, then play again)
-    // would silently play at normal speed - only setSourceRate's *later*
-    // ramps were actually reaching the real AudioParam, never this initial
-    // value. Same reasoning applies to the pitch correction: it needs to
-    // start already-corrected, not ramp in from "no correction".
-    source.playbackRate.value = currentSourceRate;
-    if (pitchNode) {
-      pitchNode.parameters.get("pitchRatio").value = computePitchTarget(currentSourceRate);
-    }
-    nudgeDirection = 0;
-    smoothedDriftUs = null;
-    fastCalibrationCorrectionActive = false;
-    fastCalibrationCorrectionEndCtxTime = null;
-    updateNudgeUi();
+    bpmWorker.postMessage(
+      {
+        dataL,
+        dataR,
+        sampleRate: BPM_ANALYSIS_SAMPLE_RATE,
+        bpmRange: BPM_RANGE,
+        timeSignature: BPM_TIME_SIGNATURE,
+        round: false,
+        float: BPM_FLOAT_PRECISION,
+      },
+      [dataL.buffer, dataR.buffer]
+    );
+  }
 
-    // If a prior segment this session already learned this browser's fixed
-    // calibration offset, bake it directly into this segment's real start
-    // time so it's born already in sync - no fast-correction burst or
-    // "calibrating..." window needed (those only run once, on the very
-    // first segment - see the tick() drift measurement section).
-    const knownCalibrationOffsetS = (driftCalibrationEnabled && driftCalibrationOffsetUs !== null)
-      ? driftCalibrationOffsetUs / 1e6
-      : 0;
+  function setStatusUi() {
+    const statusEl = el("transport-status");
+    statusEl.textContent = transport.playing ? "playing" : "paused";
+    statusEl.className = transport.playing ? "playing" : "paused";
+    el("m-revision").textContent = lastAppliedRevision;
 
-    if (lateByUs > 0) {
-      const latePositionUs = Math.max(0, positionUs + lateByUs);
-      const startedAtContextTime = ctx.currentTime + knownCalibrationOffsetS;
-      log(`late ${action} event by ${Math.round(lateByUs)}us; starting immediately at ${(latePositionUs / 1e6).toFixed(3)}s`);
-      source.start(startedAtContextTime, latePositionUs / 1e6);
-      currentSourceStart = { contextTime: startedAtContextTime, positionUs: latePositionUs };
-      measureFire();
-    } else {
-      const startAt = performanceMsToAudioContextTime(targetLocalMs) + knownCalibrationOffsetS;
-      source.start(startAt, positionUs / 1e6);
-      currentSourceStart = { contextTime: startAt, positionUs };
-      setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
-    }
-  } else {
-    // Covers "pause" and "restart" while already paused: nothing should be
-    // sounding once the effective time arrives.
-    if (lateByUs > 0) {
-      log(`late ${action} event by ${Math.round(lateByUs)}us; pausing immediately`);
-      if (currentSource) { try { currentSource.stop(); } catch (_) {} }
-      measureFire();
-    } else {
-      const stopAt = performanceMsToAudioContextTime(targetLocalMs);
-      if (currentSource) { try { currentSource.stop(stopAt); } catch (_) {} }
-      setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
+    el("tempo-slider").value = transport.playback_rate;
+    el("tempo-readout").textContent = formatTempoPercent(transport.playback_rate);
+    updateBpmDisplay(transport.playback_rate);
+    updateCueButtonUi();
+  }
+
+  // ---- playback drift correction (tempo nudge) -----------------------------
+
+  let smoothedDriftUs = null; // EMA of live drift; the nudge controller's input
+  let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
+
+  // Local-only setting (not synced room-wide, unlike nudgeEnabled) - this
+  // compensates a per-browser/per-pipeline artifact, not a room-wide
+  // preference.
+  let driftCalibrationEnabled = true;
+
+  let driftCalibrationOffsetUs = null; // learned once per session/arm-cycle, reused across every subsequent playback segment
+  let driftCalibrationSumUs = 0; // accumulator during the calibration window
+  let driftCalibrationSampleCount = 0;
+  let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the current measuring window began; null = not currently measuring
+
+  let fastCalibrationCorrectionActive = false; // true while the one-time post-calibration rate burst is running
+  let fastCalibrationCorrectionEndCtxTime = null;
+
+  let driftCalibrationProbeStarted = false; // guards against starting the background probe more than once per arm-cycle
+
+  // Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed.
+  let nudgeEnabled = true;
+
+  /// Changes currentSource's actual playback rate, ramping smoothly rather
+  /// than stepping, and rebases currentSourceStart so
+  /// currentAudioPositionUs() stays correct across the rate change. Defaults
+  /// to ramping starting right now (used by the local, unsynced nudge
+  /// corrector); pass `atContextTime` to hold the current rate until a
+  /// future scheduled moment instead (used by synced tempo changes).
+  ///
+  /// Also drives the pitch-shift node's correction in exact lockstep.
+  function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
+    if (!currentSource || !currentSourceStart || !audioCtx) return;
+    const targetCtxTime = atContextTime ?? audioCtx.currentTime;
+    const elapsedToTargetS = Math.max(0, targetCtxTime - currentSourceStart.contextTime);
+    const rawPositionAtTargetUs = currentSourceStart.positionUs + elapsedToTargetS * 1e6 * currentSourceRate;
+    const positionAtTargetUs = wrapPositionWithLoop(rawPositionAtTargetUs, currentSourceStart.positionUs);
+
+    currentSourceStart = { contextTime: targetCtxTime, positionUs: positionAtTargetUs };
+    currentSourceRate = newRate;
+
+    const rampStartCtxTime = Math.max(audioCtx.currentTime, targetCtxTime);
+
+    const rateParam = currentSource.playbackRate;
+    rateParam.cancelScheduledValues(audioCtx.currentTime);
+    rateParam.setValueAtTime(rateParam.value, audioCtx.currentTime); // pin current value, discard any pending automation
+    rateParam.setValueAtTime(rateParam.value, rampStartCtxTime); // hold until the target time (a no-op if that's "now")
+    rateParam.linearRampToValueAtTime(newRate, rampStartCtxTime + rampDurationS);
+
+    if (pitchShiftNode) {
+      const pitchParam = pitchShiftNode.parameters.get("pitchRatio");
+      const pitchTarget = computePitchTarget(newRate);
+      pitchParam.cancelScheduledValues(audioCtx.currentTime);
+      pitchParam.setValueAtTime(pitchParam.value, audioCtx.currentTime);
+      pitchParam.setValueAtTime(pitchParam.value, rampStartCtxTime);
+      pitchParam.linearRampToValueAtTime(pitchTarget, rampStartCtxTime + rampDurationS);
     }
   }
-}
 
-function applyNudgeEnabled(enabled) {
-  nudgeEnabled = enabled;
-  document.getElementById("nudge-enabled-checkbox").checked = enabled;
-  updateNudgeUi();
-}
+  function updateNudgeUi() {
+    const elm = el("m-nudge");
+    if (!nudgeEnabled) elm.textContent = "disabled";
+    else if (nudgeDirection === 0) elm.textContent = "off";
+    else elm.textContent = `${nudgeDirection > 0 ? "speeding up" : "slowing down"} (rate ${currentSourceRate.toFixed(4)})`;
+  }
 
-function applyBassCutEnabled(enabled) {
-  bassCutEnabled = enabled;
-  document.getElementById("bass-cut-checkbox").checked = enabled;
-  if (bassCutFilter && audioCtx) {
-    const target = enabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
-    const param = bassCutFilter.frequency;
+  function disengageNudge(reason) {
+    if (nudgeDirection === 0) return;
+    setSourceRate(transport.playback_rate);
+    nudgeDirection = 0;
+    updateNudgeUi();
+    log(`nudge disengaged${reason ? `: ${reason}` : ""}`);
+  }
+
+  /// Applies a real, one-time rate correction sized to close the
+  /// just-measured driftCalibrationOffsetUs in a few seconds, instead of
+  /// leaving the small generic nudge to rediscover and crawl toward the same
+  /// number over ~50s.
+  function startFastCalibrationCorrection() {
+    if (driftCalibrationOffsetUs === null || Math.abs(driftCalibrationOffsetUs) < NUDGE_ENGAGE_THRESHOLD_US) {
+      return; // negligible - nothing worth correcting
+    }
+    const offsetS = driftCalibrationOffsetUs / 1e6;
+    const durationS = Math.abs(offsetS) / FAST_CALIBRATION_MAX_RATE_DELTA;
+    const rateDelta = offsetS > 0 ? -FAST_CALIBRATION_MAX_RATE_DELTA : FAST_CALIBRATION_MAX_RATE_DELTA; // ahead -> slow down, same convention as updateNudge
+    fastCalibrationCorrectionActive = true;
+    fastCalibrationCorrectionEndCtxTime = audioCtx.currentTime + durationS;
+    const targetRate = transport.playback_rate * (1 + rateDelta);
+    setSourceRate(targetRate, undefined, Math.min(NUDGE_RAMP_S, durationS));
+    log(`fast drift-calibration correction engaged: rate -> ${targetRate.toFixed(4)} for ${durationS.toFixed(2)}s (closing known ${Math.round(driftCalibrationOffsetUs)}us gap)`);
+  }
+
+  /// Feeds one drift sample into this deck's shared calibration accumulator.
+  /// Called both by a real playback segment's own measurement (tick(),
+  /// below) and by the background silent probe (runDriftCalibrationProbe).
+  /// Returns true once calibration has just completed on this call.
+  function recordDriftCalibrationSample(rawDriftUs) {
+    if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
+    const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
+    if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
+      driftCalibrationSumUs += rawDriftUs;
+      driftCalibrationSampleCount += 1;
+      return false;
+    }
+    driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
+    log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
+    startFastCalibrationCorrection(); // a no-op if nothing is actually playing yet - see setSourceRate's guard
+    return true;
+  }
+
+  /// Learns this session's fixed calibration offset using a silent,
+  /// throwaway buffer instead of waiting for the user's first real Play
+  /// click. Runs entirely locally against the shared AudioContext - connects
+  /// straight to destination rather than through pitchNode/bassCutFilter,
+  /// since neither adds causal sample delay.
+  function runDriftCalibrationProbe() {
+    if (driftCalibrationProbeStarted || !driftCalibrationEnabled || driftCalibrationOffsetUs !== null) return;
+    driftCalibrationProbeStarted = true;
+
+    const ctx = ensureAudioContext();
+    const probeDurationS = DRIFT_CALIBRATION_DURATION_S + 1.0;
+    const silentBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * probeDurationS), ctx.sampleRate); // zero-initialized by spec - genuinely silent
+
+    // A brand-new AudioContext's getOutputTimestamp() correlation isn't
+    // meaningful yet in the instant after creation - give it a moment to
+    // actually start up first.
+    setTimeout(() => {
+      const leadMs = 150; // mirrors the server's schedule_lead_time_us convention
+      const targetPerfMs = performance.now() + leadMs;
+      const startAt = performanceMsToAudioContextTime(targetPerfMs);
+
+      const source = ctx.createBufferSource();
+      source.buffer = silentBuffer;
+      source.connect(ctx.destination);
+      source.start(startAt, 0);
+      log("background drift-calibration probe started (silent, local-only)");
+
+      const intervalId = setInterval(() => {
+        if (driftCalibrationOffsetUs !== null) {
+          clearInterval(intervalId);
+          try { source.stop(); } catch (_) { /* already stopped */ }
+          return;
+        }
+        const elapsedSinceStartS = Math.max(0, ctx.currentTime - startAt);
+        const probePositionUs = elapsedSinceStartS * 1e6;
+        const expectedPositionUs = Math.max(0, performance.now() - targetPerfMs) * 1000;
+        const rawDriftUs = probePositionUs - expectedPositionUs;
+        if (recordDriftCalibrationSample(rawDriftUs)) {
+          clearInterval(intervalId);
+          try { source.stop(); } catch (_) { /* already stopped */ }
+        }
+      }, 50);
+    }, AUDIO_CONTEXT_WARMUP_MS);
+  }
+
+  /// Bang-bang control with hysteresis: engage a small rate correction once
+  /// smoothed drift clears the noise floor, hold it until drift is back near
+  /// zero, then release.
+  function updateNudge(driftUs) {
+    if (!nudgeEnabled || driftUs === null) {
+      disengageNudge();
+      return;
+    }
+    if (nudgeDirection === 0 && Math.abs(driftUs) > NUDGE_ENGAGE_THRESHOLD_US) {
+      nudgeDirection = driftUs > 0 ? -1 : 1;
+      setSourceRate(transport.playback_rate * (1 + nudgeDirection * NUDGE_RATE_DELTA));
+      updateNudgeUi();
+      log(`nudge engaged: audio ${driftUs > 0 ? "ahead of" : "behind"} model by ${Math.round(Math.abs(driftUs))}us (smoothed), rate -> ${currentSourceRate.toFixed(4)}`);
+    } else if (nudgeDirection !== 0 && Math.abs(driftUs) < NUDGE_DISENGAGE_THRESHOLD_US) {
+      disengageNudge("drift back within tolerance");
+    }
+  }
+
+  // ---- tempo control ---------------------------------------------------------
+
+  let isDraggingLocally = false; // true while THIS client owns the fader; local rendering bypasses the buffer entirely
+  let tempoSampleBuffer = []; // [{serverTimeUs, value, revision}], ascending by serverTimeUs - remote render input only
+
+  let lastTempoSampleSentAtMs = -Infinity;
+  let tempoSamplesSentInWindow = 0; // reset every 1s
+  let lastTempoSampleReceivedAtMs = null;
+  let tempoDiscardedStaleCount = 0;
+  let pendingLocalTempoRelease = null; // {value, sentAtMs} - sender-side round-trip diagnostic for the forced final send
+
+  /// Throttled send: at most one message per TEMPO_SAMPLE_INTERVAL_MS unless
+  /// `force` (used for the release/change-completion sample).
+  function sendTempoSample(rate, force) {
+    const nowMs = performance.now();
+    if (!force && nowMs - lastTempoSampleSentAtMs < TEMPO_SAMPLE_INTERVAL_MS) return;
+    lastTempoSampleSentAtMs = nowMs;
+    tempoSamplesSentInWindow++;
+    ws.send(JSON.stringify({ type: "set_tempo_request", request_id: `request-${randomId()}`, deck: deckId, playback_rate: rate }));
+    if (force) pendingLocalTempoRelease = { value: rate, sentAtMs: nowMs };
+  }
+
+  /// Audio reacts to every accepted sample right away, ramped smoothly and
+  /// composed with any active local nudge correction.
+  function scheduleTempoAudioRamp(baseRate) {
+    if (!currentSource || !currentSourceStart || !audioCtx) return;
+    const targetRate = baseRate * (nudgeDirection === 0 ? 1 : 1 + nudgeDirection * NUDGE_RATE_DELTA);
+    setSourceRate(targetRate, undefined, TEMPO_SAMPLE_RAMP_S);
+  }
+
+  /// Applies an accepted tempo sample: updates the authoritative model and
+  /// audio immediately, but only *queues* the value for the delayed/
+  /// interpolated visual render.
+  function applyTempoSample(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      tempoDiscardedStaleCount++;
+      el("m-tempo-discarded").textContent = tempoDiscardedStaleCount;
+      log(`discarded stale tempo sample (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    el("m-revision").textContent = lastAppliedRevision;
+
+    const nowMs = performance.now();
+    if (lastTempoSampleReceivedAtMs !== null) {
+      el("m-tempo-interval").textContent = (nowMs - lastTempoSampleReceivedAtMs).toFixed(1);
+    }
+    lastTempoSampleReceivedAtMs = nowMs;
+
+    transport = { ...transport, playback_rate: msg.playback_rate, anchor_position_us: msg.position_us, anchor_server_time_us: msg.effective_server_time_us };
+    tempoSampleBuffer.push({ serverTimeUs: msg.effective_server_time_us, value: msg.playback_rate, revision: msg.revision });
+    scheduleTempoAudioRamp(msg.playback_rate);
+
+    if (msg.origin_connection_id === connectionId && pendingLocalTempoRelease && Math.abs(msg.playback_rate - pendingLocalTempoRelease.value) < 1e-9) {
+      const roundTripMs = nowMs - pendingLocalTempoRelease.sentAtMs;
+      el("m-tempo-release-rtt").textContent = roundTripMs.toFixed(1);
+      log(`tempo release round-trip: ${roundTripMs.toFixed(1)}ms`);
+      pendingLocalTempoRelease = null;
+    }
+  }
+
+  /// Drops buffered samples we'll never need again.
+  function trimTempoSampleBuffer(renderTimeUs) {
+    let cut = 0;
+    for (let i = 0; i < tempoSampleBuffer.length - 1; i++) {
+      if (tempoSampleBuffer[i + 1].serverTimeUs <= renderTimeUs) cut = i + 1;
+      else break;
+    }
+    if (cut > 0) tempoSampleBuffer.splice(0, cut);
+  }
+
+  /// Renders the remote tempo fader from the interpolation buffer: finds the
+  /// two samples surrounding `renderTimeUs` and linearly interpolates
+  /// between them. Falls back to holding the nearest known value when
+  /// there's no pair to interpolate between yet.
+  function renderTempoFader() {
+    if (isDraggingLocally) return; // local input owns the DOM value while dragging
+    const nowServerUs = estimateServerTimeUs();
+    if (nowServerUs === null) return;
+    const renderTimeUs = nowServerUs - TEMPO_INTERPOLATION_DELAY_US;
+
+    let prev = null;
+    let next = null;
+    for (const sample of tempoSampleBuffer) {
+      if (sample.serverTimeUs <= renderTimeUs) prev = sample;
+      else { next = sample; break; }
+    }
+
+    let displayValue;
+    if (prev && next) {
+      const span = next.serverTimeUs - prev.serverTimeUs;
+      const frac = span > 0 ? Math.min(1, Math.max(0, (renderTimeUs - prev.serverTimeUs) / span)) : 1;
+      displayValue = prev.value + (next.value - prev.value) * frac;
+    } else if (prev) {
+      displayValue = prev.value; // no newer sample yet - hold rather than jump
+    } else if (next) {
+      displayValue = next.value; // cold start: render time is before our earliest sample
+    } else {
+      return; // nothing buffered at all yet
+    }
+
+    el("tempo-slider").value = displayValue;
+    el("tempo-readout").textContent = formatTempoPercent(displayValue);
+    updateBpmDisplay(displayValue);
+    trimTempoSampleBuffer(renderTimeUs);
+  }
+
+  /// Schedules (or, if already due, immediately executes) a play/pause/
+  /// restart transition against the local Web Audio clock. `willBePlaying`
+  /// is the model's playing state *after* this event.
+  function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePlaying) {
+    const nowServerUs = estimateServerTimeUs();
+    const lateByUs = nowServerUs === null ? 0 : nowServerUs - effectiveServerTimeUs;
+    el("m-scheduled").textContent = Math.round(effectiveServerTimeUs);
+
+    const targetLocalMs = performance.now() + (effectiveServerTimeUs - nowServerUs) / 1000;
+    const measureFire = () => {
+      const actualServerUs = estimateServerTimeUs();
+      const errorUs = actualServerUs - effectiveServerTimeUs;
+      el("m-actual").textContent = Math.round(actualServerUs);
+      el("m-error").textContent = Math.round(errorUs);
+      log(`${action} executed; scheduling error ${Math.round(errorUs)}us`);
+    };
+
+    if (!audioBuffer) {
+      if (lateByUs > 0) {
+        log(`late ${action} event by ${Math.round(lateByUs)}us (no audio loaded, model-only)`);
+        measureFire();
+      } else {
+        setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
+      }
+      return;
+    }
+
+    const ctx = ensureAudioContext();
+
+    if (willBePlaying) {
+      if (currentSource) {
+        try { currentSource.stop(); } catch (_) { /* already stopped */ }
+      }
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      const pitchNode = ensurePitchShiftNode(); // null if unavailable - fall back to no pitch-lock
+      source.connect(pitchNode || ensureBassCutFilter());
+      source.onended = () => {
+        if (currentSource === source) {
+          currentSource = null;
+          currentSourceStart = null;
+          nudgeDirection = 0;
+          updateNudgeUi();
+        }
+      };
+      currentSource = source;
+      applyLoopRegionToCurrentSource(); // start already respecting whatever loop currently exists, if any
+      currentSourceRate = transport.playback_rate;
+      source.playbackRate.value = currentSourceRate;
+      if (pitchNode) {
+        pitchNode.parameters.get("pitchRatio").value = computePitchTarget(currentSourceRate);
+      }
+      nudgeDirection = 0;
+      smoothedDriftUs = null;
+      fastCalibrationCorrectionActive = false;
+      fastCalibrationCorrectionEndCtxTime = null;
+      updateNudgeUi();
+
+      const knownCalibrationOffsetS = (driftCalibrationEnabled && driftCalibrationOffsetUs !== null)
+        ? driftCalibrationOffsetUs / 1e6
+        : 0;
+
+      if (lateByUs > 0) {
+        const latePositionUs = Math.max(0, positionUs + lateByUs);
+        const startedAtContextTime = ctx.currentTime + knownCalibrationOffsetS;
+        log(`late ${action} event by ${Math.round(lateByUs)}us; starting immediately at ${(latePositionUs / 1e6).toFixed(3)}s`);
+        source.start(startedAtContextTime, latePositionUs / 1e6);
+        currentSourceStart = { contextTime: startedAtContextTime, positionUs: latePositionUs };
+        measureFire();
+      } else {
+        const startAt = performanceMsToAudioContextTime(targetLocalMs) + knownCalibrationOffsetS;
+        source.start(startAt, positionUs / 1e6);
+        currentSourceStart = { contextTime: startAt, positionUs };
+        setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
+      }
+    } else {
+      if (lateByUs > 0) {
+        log(`late ${action} event by ${Math.round(lateByUs)}us; pausing immediately`);
+        if (currentSource) { try { currentSource.stop(); } catch (_) {} }
+        measureFire();
+      } else {
+        const stopAt = performanceMsToAudioContextTime(targetLocalMs);
+        if (currentSource) { try { currentSource.stop(stopAt); } catch (_) {} }
+        setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
+      }
+    }
+  }
+
+  function applyNudgeEnabled(enabled) {
+    nudgeEnabled = enabled;
+    el("nudge-enabled-checkbox").checked = enabled;
+    updateNudgeUi();
+  }
+
+  function applyBassCutEnabled(enabled) {
+    bassCutEnabled = enabled;
+    el("bass-cut-checkbox").checked = enabled;
+    if (bassCutFilter && audioCtx) {
+      const target = enabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
+      const param = bassCutFilter.frequency;
+      param.cancelScheduledValues(audioCtx.currentTime);
+      param.setValueAtTime(param.value, audioCtx.currentTime);
+      param.linearRampToValueAtTime(target, audioCtx.currentTime + BASS_CUT_RAMP_S);
+    }
+  }
+
+  function applyPitchLockEnabled(enabled) {
+    pitchLockEnabled = enabled;
+    el("pitch-lock-checkbox").checked = enabled;
+    if (!pitchShiftNode || !audioCtx) return;
+    const target = computePitchTarget(currentSourceRate);
+    const param = pitchShiftNode.parameters.get("pitchRatio");
     param.cancelScheduledValues(audioCtx.currentTime);
     param.setValueAtTime(param.value, audioCtx.currentTime);
-    param.linearRampToValueAtTime(target, audioCtx.currentTime + BASS_CUT_RAMP_S);
+    param.linearRampToValueAtTime(target, audioCtx.currentTime + PITCH_LOCK_TOGGLE_RAMP_S);
   }
-}
 
-function applySnapshot(msg) {
-  transport = msg.transport;
-  lastAppliedRevision = msg.revision;
-  applyNudgeEnabled(msg.nudge_enabled);
-  applyBassCutEnabled(msg.bass_cut_enabled);
-  applyPitchLockEnabled(msg.pitch_lock_enabled);
-  cuePointUs = msg.cue_point_us;
-  loopRegion = msg.loop_region;
-  window.renderRegions?.({ cuePointUs, loopRegion });
-  updateReloopButtonUi();
-  // A reconnect starts a fresh timeline - any buffered tempo samples belong
-  // to a session that no longer exists, so drop them rather than let stale
-  // pre-reconnect data leak into a post-reconnect interpolated render.
-  tempoSampleBuffer = [];
-  setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled}, cue_point_us=${msg.cue_point_us}, loop_region=${JSON.stringify(msg.loop_region)})`);
-}
-
-function applyCuePointEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate cue_point_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
+  function applySnapshot(dto) {
+    transport = dto.transport;
+    lastAppliedRevision = dto.revision;
+    applyNudgeEnabled(dto.nudge_enabled);
+    applyBassCutEnabled(dto.bass_cut_enabled);
+    applyPitchLockEnabled(dto.pitch_lock_enabled);
+    cuePointUs = dto.cue_point_us;
+    loopRegion = dto.loop_region;
+    window.renderRegions?.(deckId, { cuePointUs, loopRegion });
+    updateReloopButtonUi();
+    // A reconnect starts a fresh timeline - any buffered tempo samples belong
+    // to a session that no longer exists.
+    tempoSampleBuffer = [];
+    setStatusUi();
+    log(`state_snapshot applied (revision ${dto.revision}, playing=${transport.playing}, nudge_enabled=${dto.nudge_enabled}, bass_cut_enabled=${dto.bass_cut_enabled}, pitch_lock_enabled=${dto.pitch_lock_enabled}, cue_point_us=${dto.cue_point_us}, loop_region=${JSON.stringify(dto.loop_region)})`);
   }
-  lastAppliedRevision = msg.revision;
-  cuePointUs = msg.position_us;
-  window.renderRegions?.({ cuePointUs, loopRegion });
-  updateCueButtonUi();
-  log(`cue_point_changed (revision ${msg.revision}): position ${msg.position_us}us`);
-}
 
-function applyLoopChangedEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate loop_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
+  function applyCuePointEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate cue_point_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    cuePointUs = msg.position_us;
+    window.renderRegions?.(deckId, { cuePointUs, loopRegion });
+    updateCueButtonUi();
+    log(`cue_point_changed (revision ${msg.revision}): position ${msg.position_us}us`);
   }
-  lastAppliedRevision = msg.revision;
-  loopRegion = { start_us: msg.start_us, end_us: msg.end_us, active: msg.active };
-  window.renderRegions?.({ cuePointUs, loopRegion });
-  updateReloopButtonUi();
-  applyLoopRegionToCurrentSource();
-  log(`loop_changed (revision ${msg.revision}): [${msg.start_us}, ${msg.end_us}) active=${msg.active}`);
-}
 
-/// Applies the current loopRegion to currentSource's native loop/loopStart/
-/// loopEnd. These are plain attributes, not AudioParams - the spec allows
-/// changing them on an already-started, already-playing node, taking effect
-/// on its very next loop-boundary check - so toggling a loop active/inactive
-/// (or inserting a new one at the current position, which by construction
-/// never moves the playhead) never needs to restart/recreate the source.
-/// Called both here (an existing source, loop state changed) and from
-/// scheduleAudioAction right after creating a fresh source (a source that
-/// needs to start already respecting whatever loop currently exists).
-function applyLoopRegionToCurrentSource() {
-  if (!currentSource) return;
-  if (loopRegion && loopRegion.active) {
-    currentSource.loop = true;
-    currentSource.loopStart = loopRegion.start_us / 1e6;
-    currentSource.loopEnd = loopRegion.end_us / 1e6;
-  } else {
-    currentSource.loop = false;
+  function applyLoopChangedEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate loop_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    loopRegion = { start_us: msg.start_us, end_us: msg.end_us, active: msg.active };
+    window.renderRegions?.(deckId, { cuePointUs, loopRegion });
+    updateReloopButtonUi();
+    applyLoopRegionToCurrentSource();
+    log(`loop_changed (revision ${msg.revision}): [${msg.start_us}, ${msg.end_us}) active=${msg.active}`);
   }
-}
 
-function applyTransportEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate transport_event (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
+  /// Applies the current loopRegion to currentSource's native loop/loopStart/
+  /// loopEnd. These are plain attributes, not AudioParams - changing them on
+  /// an already-started, already-playing node takes effect on its very next
+  /// loop-boundary check, so toggling a loop active/inactive never needs to
+  /// restart/recreate the source.
+  function applyLoopRegionToCurrentSource() {
+    if (!currentSource) return;
+    if (loopRegion && loopRegion.active) {
+      currentSource.loop = true;
+      currentSource.loopStart = loopRegion.start_us / 1e6;
+      currentSource.loopEnd = loopRegion.end_us / 1e6;
+    } else {
+      currentSource.loop = false;
+    }
   }
-  lastAppliedRevision = msg.revision;
-  // "restart" and "seek" don't change whether it's playing or paused, so
-  // they keep whatever the model already had for that flag. ("set_tempo"
-  // also preserves it, but that action is routed to applyTempoSample
-  // instead, never here - see the websocket message switch.)
-  const preservesPlayingState = msg.action === "restart" || msg.action === "seek";
-  const willBePlaying = preservesPlayingState ? transport.playing : msg.action === "play";
-  transport = {
-    playing: willBePlaying,
-    anchor_position_us: msg.position_us,
-    anchor_server_time_us: msg.effective_server_time_us,
-    playback_rate: msg.playback_rate,
+
+  function applyTransportEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate transport_event (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    const preservesPlayingState = msg.action === "restart" || msg.action === "seek";
+    const willBePlaying = preservesPlayingState ? transport.playing : msg.action === "play";
+    transport = {
+      playing: willBePlaying,
+      anchor_position_us: msg.position_us,
+      anchor_server_time_us: msg.effective_server_time_us,
+      playback_rate: msg.playback_rate,
+    };
+    setStatusUi();
+    log(`transport_event ${msg.action} (revision ${msg.revision}) effective at ${msg.effective_server_time_us}us, position ${msg.position_us}us`);
+    scheduleAudioAction(msg.action, msg.effective_server_time_us, msg.position_us, willBePlaying);
+  }
+
+  function applyNudgeSettingEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate nudge_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    applyNudgeEnabled(msg.enabled);
+    log(`nudge_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+  }
+
+  function applyBassCutSettingEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate bass_cut_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    applyBassCutEnabled(msg.enabled);
+    log(`bass_cut_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+  }
+
+  function applyPitchLockSettingEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate pitch_lock_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    applyPitchLockEnabled(msg.enabled);
+    log(`pitch_lock_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+  }
+
+  // ---- per-frame update -----------------------------------------------------
+
+  function tick(dtS, nowServerUs) {
+    if (nowServerUs !== null) {
+      const positionUs = currentModelPositionUs(nowServerUs);
+      el("position-readout").textContent = `${(positionUs / 1e6).toFixed(3)}s`;
+      if (audioBuffer) {
+        el("position-bar").max = audioBuffer.duration;
+        el("position-bar").value = positionUs / 1e6;
+        // Drives the waveform's visual playhead from the same shared model
+        // position. setTime() never emits wavesurfer's "interaction" event
+        // (only genuine clicks/drags do), so this can't loop back into a
+        // seek request.
+        window.waveSurfers?.[deckId]?.setTime(positionUs / 1e6);
+      }
+
+      const audioPositionUs = transport.playing ? currentAudioPositionUs() : null;
+      if (audioPositionUs === null) {
+        el("m-drift").textContent = "-";
+        el("m-drift-smoothed").textContent = "-";
+        smoothedDriftUs = null;
+        updateNudge(null);
+      } else {
+        const rawDriftUs = audioPositionUs - positionUs;
+        el("m-drift").textContent = Math.round(rawDriftUs);
+
+        if (!driftCalibrationEnabled) {
+          const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
+          smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
+          el("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
+          updateNudge(smoothedDriftUs);
+        } else if (driftCalibrationOffsetUs === null) {
+          el("m-drift-smoothed").textContent = "calibrating...";
+          recordDriftCalibrationSample(rawDriftUs);
+          updateNudge(null);
+        } else if (fastCalibrationCorrectionActive) {
+          if (audioCtx.currentTime >= fastCalibrationCorrectionEndCtxTime) {
+            fastCalibrationCorrectionActive = false;
+            setSourceRate(transport.playback_rate);
+            log("fast drift-calibration correction complete; resuming normal nudge monitoring");
+          } else {
+            el("m-drift-smoothed").textContent = "correcting...";
+            el("m-nudge").textContent = `fast calibration correction (rate ${currentSourceRate.toFixed(4)})`;
+          }
+        } else {
+          const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
+          smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
+          el("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
+          updateNudge(smoothedDriftUs);
+        }
+      }
+    }
+    renderTempoFader();
+  }
+
+  // ---- websocket bridge (used by the shared connect() dispatch and by
+  // waveform.js's cross-script bridge) -----------------------------------
+
+  function sendSeekRequest(positionUs) {
+    ws.send(JSON.stringify({ type: "seek_request", request_id: `request-${randomId()}`, deck: deckId, position_us: positionUs }));
+  }
+
+  function onOpen() {
+    for (const name of PER_DECK_CONNECTION_TOGGLE_IDS) {
+      const elm = el(name);
+      if (elm) elm.disabled = false;
+    }
+    updateCueButtonUi();
+    updateLoopButtonUi();
+    updateReloopButtonUi();
+  }
+
+  function onClose() {
+    for (const name of PER_DECK_CONNECTION_TOGGLE_IDS) {
+      const elm = el(name);
+      if (elm) elm.disabled = true;
+    }
+  }
+
+  // ---- UI wiring --------------------------------------------------------
+
+  el("file-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    el("file-status").textContent = "decoding...";
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const ctx = ensureAudioContext();
+      runDriftCalibrationProbe(); // a no-op if already started elsewhere
+      await ensurePitchWorkletLoaded(ctx);
+      audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+      el("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
+      log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
+      window.waveSurfers?.[deckId]?.loadBlob(file);
+      startBpmDetection(audioBuffer); // deliberately not awaited - runs in the background, must not block playback
+    } catch (err) {
+      audioBuffer = null;
+      el("file-status").textContent = `failed to load "${file.name}": ${err.message ?? err}`;
+      log(`failed to decode audio file "${file.name}": ${err.message ?? err}`);
+    }
+  });
+
+  el("play-pause-btn").addEventListener("click", () => {
+    const action = transport.playing ? "pause" : "play";
+    ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action }));
+  });
+  el("restart-btn").addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action: "restart" }));
+  });
+
+  /// Pauses the transport at whatever cue_point_us the server currently
+  /// holds. Shared by two call sites: pressing Cue while already playing,
+  /// and releasing a preview hold.
+  function sendCueRelease() {
+    ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action: "cue_release" }));
+  }
+
+  /// Ends a cue preview hold: releases the transport back to (and pauses at)
+  /// the cue point.
+  function releaseCuePreview() {
+    if (!cuePreviewActive) return;
+    cuePreviewActive = false;
+    sendCueRelease();
+  }
+
+  {
+    const cueBtnEl = el("cue-btn");
+    cueBtnEl.addEventListener("pointerdown", () => {
+      if (transport.playing) {
+        sendCueRelease();
+        return;
+      }
+
+      if (cuePointUs !== null && transport.anchor_position_us === cuePointUs) {
+        cuePreviewActive = true;
+        ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action: "play" }));
+      } else {
+        ws.send(JSON.stringify({ type: "set_cue_point", request_id: `request-${randomId()}`, deck: deckId, position_us: transport.anchor_position_us }));
+      }
+    });
+    cueBtnEl.addEventListener("pointerup", releaseCuePreview);
+    cueBtnEl.addEventListener("pointercancel", releaseCuePreview);
+  }
+
+  el("loop-btn").addEventListener("click", () => {
+    const nowServerUs = estimateServerTimeUs();
+    if (nowServerUs === null || detectedBaseBpm === null) return; // button is disabled in this state anyway
+    const positionUs = currentModelPositionUs(nowServerUs);
+    const withinActiveLoop =
+      loopRegion && loopRegion.active && positionUs >= loopRegion.start_us && positionUs < loopRegion.end_us;
+    if (withinActiveLoop) {
+      ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, deck: deckId, active: false }));
+    } else {
+      const loopDurationUs = Math.round(LOOP_BEAT_COUNT * (60 / detectedBaseBpm) * 1e6);
+      const startUs = Math.round(positionUs);
+      ws.send(
+        JSON.stringify({
+          type: "set_loop",
+          request_id: `request-${randomId()}`,
+          deck: deckId,
+          start_us: startUs,
+          end_us: startUs + loopDurationUs,
+        })
+      );
+    }
+  });
+
+  el("reloop-btn").addEventListener("click", () => {
+    if (!loopRegion) return; // button is disabled in this state anyway
+    if (loopRegion.active) {
+      ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, deck: deckId, active: false }));
+    } else {
+      ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, deck: deckId, active: true }));
+      sendSeekRequest(cuePointUs);
+    }
+  });
+
+  el("nudge-enabled-checkbox").addEventListener("change", (e) => {
+    const desired = e.target.checked;
+    e.target.checked = nudgeEnabled;
+    ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, deck: deckId, enabled: desired }));
+  });
+  el("drift-calibration-checkbox").addEventListener("change", (e) => {
+    driftCalibrationEnabled = e.target.checked;
+    if (fastCalibrationCorrectionActive) {
+      fastCalibrationCorrectionActive = false;
+      setSourceRate(transport.playback_rate);
+    }
+    if (driftCalibrationEnabled) {
+      driftCalibrationOffsetUs = null;
+      driftCalibrationSumUs = 0;
+      driftCalibrationSampleCount = 0;
+      driftCalibrationArmedAtCtxTime = null;
+      driftCalibrationProbeStarted = false;
+      if (audioCtx) runDriftCalibrationProbe();
+    }
+    log(`drift calibration ${driftCalibrationEnabled ? "enabled" : "disabled"} (local only)`);
+  });
+  {
+    const bpmEngineSelectEl = el("bpm-engine-select");
+    bpmEngineSelectEl.value = bpmEngine;
+    bpmEngineSelectEl.addEventListener("change", (e) => {
+      bpmEngine = e.target.value;
+      setCookie(`bpm_engine_${deckId}`, bpmEngine);
+      log(`BPM detection engine changed to ${bpmEngine} (local only)`);
+      if (audioBuffer) startBpmDetection(audioBuffer);
+    });
+  }
+  el("bass-cut-checkbox").addEventListener("change", (e) => {
+    const desired = e.target.checked;
+    e.target.checked = bassCutEnabled;
+    ws.send(JSON.stringify({ type: "set_bass_cut_enabled", request_id: `request-${randomId()}`, deck: deckId, enabled: desired }));
+  });
+  el("pitch-lock-checkbox").addEventListener("change", (e) => {
+    const desired = e.target.checked;
+    e.target.checked = pitchLockEnabled;
+    ws.send(JSON.stringify({ type: "set_pitch_lock_enabled", request_id: `request-${randomId()}`, deck: deckId, enabled: desired }));
+  });
+  {
+    const tempoSliderEl = el("tempo-slider");
+    tempoSliderEl.addEventListener("pointerdown", () => { isDraggingLocally = true; });
+    tempoSliderEl.addEventListener("pointerup", () => { isDraggingLocally = false; });
+    tempoSliderEl.addEventListener("pointercancel", () => { isDraggingLocally = false; });
+
+    tempoSliderEl.addEventListener("input", (e) => {
+      const rate = parseFloat(e.target.value);
+      el("tempo-readout").textContent = formatTempoPercent(rate);
+      updateBpmDisplay(rate);
+      sendTempoSample(rate, false);
+    });
+
+    tempoSliderEl.addEventListener("change", (e) => {
+      sendTempoSample(parseFloat(e.target.value), true);
+      isDraggingLocally = false;
+    });
+  }
+
+  el("m-tempo-delay").textContent = (TEMPO_INTERPOLATION_DELAY_US / 1000).toFixed(0);
+  setInterval(() => {
+    el("m-tempo-send-rate").textContent = `${tempoSamplesSentInWindow}/s`;
+    tempoSamplesSentInWindow = 0;
+  }, 1000);
+  setInterval(() => {
+    if (smoothedDriftUs === null) return;
+    const nudgeText = nudgeDirection === 0 ? "no correction" : nudgeDirection > 0 ? "speeding up" : "slowing down";
+    log(`playback drift (smoothed): audio is ${smoothedDriftUs >= 0 ? "ahead of" : "behind"} model by ${Math.abs(Math.round(smoothedDriftUs))}us - ${nudgeText}`);
+  }, PLAYBACK_DRIFT_LOG_INTERVAL_MS);
+
+  return {
+    id: deckId,
+    applySnapshot,
+    applyTransportEvent,
+    applyNudgeSettingEvent,
+    applyBassCutSettingEvent,
+    applyPitchLockSettingEvent,
+    applyCuePointEvent,
+    applyLoopChangedEvent,
+    applyTempoSample,
+    tick,
+    onOpen,
+    onClose,
+    runDriftCalibrationProbe,
+    sendSeekRequest,
+    getCuePointUs: () => cuePointUs,
+    getLoopRegion: () => loopRegion,
   };
-  setStatusUi();
-  log(`transport_event ${msg.action} (revision ${msg.revision}) effective at ${msg.effective_server_time_us}us, position ${msg.position_us}us`);
-  scheduleAudioAction(msg.action, msg.effective_server_time_us, msg.position_us, willBePlaying);
 }
 
-function applyNudgeSettingEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate nudge_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
-  }
-  lastAppliedRevision = msg.revision;
-  applyNudgeEnabled(msg.enabled);
-  log(`nudge_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
-}
+// window.__sharedLog lets createDeck's per-deck log() reach the one shared
+// log panel without every deck needing its own copy of the DOM-writing code.
+window.__sharedLog = log;
 
-function applyBassCutSettingEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate bass_cut_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
-  }
-  lastAppliedRevision = msg.revision;
-  applyBassCutEnabled(msg.enabled);
-  log(`bass_cut_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
-}
-
-function applyPitchLockSettingEvent(msg) {
-  if (msg.revision <= lastAppliedRevision) {
-    log(`ignoring stale/duplicate pitch_lock_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
-    return;
-  }
-  lastAppliedRevision = msg.revision;
-  applyPitchLockEnabled(msg.enabled);
-  log(`pitch_lock_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
-}
+const deckA = createDeck("a");
+const deckB = createDeck("b");
+window.decks = { a: deckA, b: deckB };
 
 // ---- websocket -----------------------------------------------------------
 
 const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 let ws;
+let connectionId = null;
+
+function deckFor(msg) {
+  return msg.deck === "b" ? deckB : deckA;
+}
 
 function connect() {
   ws = new WebSocket(wsUrl);
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
-      document.getElementById(btn).disabled = false;
-    }
-    updateCueButtonUi(); // refine cue-btn further: may re-disable if playing with no cue point yet
-    updateLoopButtonUi(); // refine loop-btn further: may re-disable if no BPM detected yet
-    updateReloopButtonUi(); // refine reloop-btn further: may re-disable if no loop exists yet
+    document.getElementById("state-btn").disabled = false;
+    document.getElementById("resync-btn").disabled = false;
+    deckA.onOpen();
+    deckB.onOpen();
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
     startPeriodicResync();
   });
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
-      document.getElementById(btn).disabled = true;
-    }
+    document.getElementById("state-btn").disabled = true;
+    document.getElementById("resync-btn").disabled = true;
+    deckA.onClose();
+    deckB.onClose();
     stopPeriodicResync();
     setTimeout(connect, 1000);
   });
@@ -1317,7 +1601,8 @@ function connect() {
         log(`welcome: connection_id=${connectionId} schedule_lead_time_us=${msg.schedule_lead_time_us}`);
         break;
       case "state_snapshot":
-        applySnapshot(msg);
+        deckA.applySnapshot(msg.deck_a);
+        deckB.applySnapshot(msg.deck_b);
         break;
       case "clock_response": {
         const t0Ms = pendingClockRequests.get(msg.request_id);
@@ -1328,23 +1613,23 @@ function connect() {
         break;
       }
       case "transport_event":
-        if (msg.action === "set_tempo") applyTempoSample(msg);
-        else applyTransportEvent(msg);
+        if (msg.action === "set_tempo") deckFor(msg).applyTempoSample(msg);
+        else deckFor(msg).applyTransportEvent(msg);
         break;
       case "nudge_setting_changed":
-        applyNudgeSettingEvent(msg);
+        deckFor(msg).applyNudgeSettingEvent(msg);
         break;
       case "bass_cut_setting_changed":
-        applyBassCutSettingEvent(msg);
+        deckFor(msg).applyBassCutSettingEvent(msg);
         break;
       case "pitch_lock_setting_changed":
-        applyPitchLockSettingEvent(msg);
+        deckFor(msg).applyPitchLockSettingEvent(msg);
         break;
       case "cue_point_changed":
-        applyCuePointEvent(msg);
+        deckFor(msg).applyCuePointEvent(msg);
         break;
       case "loop_changed":
-        applyLoopChangedEvent(msg);
+        deckFor(msg).applyLoopChangedEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
@@ -1355,346 +1640,37 @@ function connect() {
   });
 }
 
-// ---- UI wiring -------------------------------------------------------------
-
-document.getElementById("file-input").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  document.getElementById("file-status").textContent = "decoding...";
-  try {
-    const arrayBuffer = await file.arrayBuffer();
-    const ctx = ensureAudioContext();
-    runDriftCalibrationProbe(); // a no-op if already started elsewhere (e.g. first click/keypress, see below)
-    await ensurePitchWorkletLoaded(ctx);
-    audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    document.getElementById("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
-    log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
-    // The waveform is a separate visualization/seek-input layer (see
-    // waveform.js) - it decodes and renders the file itself via its own
-    // hidden <audio> element, entirely independent of the AudioBufferSourceNode
-    // graph above that actually plays sound. Uses `file` (the original File),
-    // not `arrayBuffer`, since decodeAudioData may have already detached it.
-    window.waveSurfer?.loadBlob(file);
-    startBpmDetection(audioBuffer); // deliberately not awaited - runs in the background, must not block playback
-  } catch (err) {
-    // Without this, any failure here (unsupported/corrupt file, decode
-    // error, ...) was an unhandled promise rejection that left the UI
-    // stuck on "decoding..." forever instead of telling you what happened.
-    audioBuffer = null;
-    document.getElementById("file-status").textContent = `failed to load "${file.name}": ${err.message ?? err}`;
-    log(`failed to decode audio file "${file.name}": ${err.message ?? err}`);
-  }
-});
-
-document.getElementById("play-pause-btn").addEventListener("click", () => {
-  const action = transport.playing ? "pause" : "play";
-  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action }));
-});
-document.getElementById("restart-btn").addEventListener("click", () => {
-  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "restart" }));
-});
-
-/// Pauses the transport at whatever cue_point_us the server currently
-/// holds (see the cue_release transport action - server-authoritative, no
-/// position travels from the client). Shared by two call sites: pressing
-/// Cue while already playing (see pointerdown below - a direct pause, no
-/// hold gesture needed), and releasing a preview hold.
-function sendCueRelease() {
-  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "cue_release" }));
-}
-
-/// Ends a cue preview hold: releases the transport back to (and pauses at)
-/// the cue point. Shared by both pointerup and pointercancel so a preview
-/// can never get stuck "playing" if the release gesture is interrupted
-/// (pointer dragged off the button, OS-level cancellation, etc.) - same
-/// concern the tempo slider's pointercancel handler guards against.
-function releaseCuePreview() {
-  if (!cuePreviewActive) return;
-  cuePreviewActive = false;
-  sendCueRelease();
-}
-
-{
-  const cueBtnEl = document.getElementById("cue-btn");
-  cueBtnEl.addEventListener("pointerdown", () => {
-    if (transport.playing) {
-      // Playing + a cue point exists (the button is disabled otherwise):
-      // the down event alone pauses and resets the playhead to the cue
-      // point - no hold/release gesture here, unlike the paused-at-cue-point
-      // case below (cuePreviewActive is never set, so a later pointerup/
-      // pointercancel correctly no-ops via releaseCuePreview's own guard).
-      sendCueRelease();
-      return;
-    }
-
-    // Paused. transport.anchor_position_us is the exact current position
-    // (no elapsed-time math while paused), so this comparison is exact -
-    // no floating-point tolerance needed.
-    if (cuePointUs !== null && transport.anchor_position_us === cuePointUs) {
-      // Paused exactly at the existing cue point: hold to preview:
-      // pointerdown plays from here, release resets to the cue point and
-      // pauses again (see releaseCuePreview).
-      cuePreviewActive = true;
-      ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "play" }));
-    } else {
-      // Anywhere else while paused: set/overwrite the cue point at the
-      // current position and stay paused.
-      ws.send(JSON.stringify({ type: "set_cue_point", request_id: `request-${randomId()}`, position_us: transport.anchor_position_us }));
-    }
-  });
-  cueBtnEl.addEventListener("pointerup", releaseCuePreview);
-  cueBtnEl.addEventListener("pointercancel", releaseCuePreview);
-}
-
-document.getElementById("loop-btn").addEventListener("click", () => {
-  const nowServerUs = estimateServerTimeUs();
-  if (nowServerUs === null || detectedBaseBpm === null) return; // button is disabled in this state anyway
-  const positionUs = currentModelPositionUs(nowServerUs);
-  const withinActiveLoop =
-    loopRegion && loopRegion.active && positionUs >= loopRegion.start_us && positionUs < loopRegion.end_us;
-  if (withinActiveLoop) {
-    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: false }));
-  } else {
-    // 16 beats of *content* time (detectedBaseBpm, the track's own nominal
-    // tempo) - not currentBpm()/transport.playback_rate, since loop bounds
-    // live in position_us (buffer-content time), which is independent of
-    // however fast we're currently playing it back.
-    const loopDurationUs = Math.round(LOOP_BEAT_COUNT * (60 / detectedBaseBpm) * 1e6);
-    const startUs = Math.round(positionUs);
-    ws.send(
-      JSON.stringify({
-        type: "set_loop",
-        request_id: `request-${randomId()}`,
-        start_us: startUs,
-        end_us: startUs + loopDurationUs,
-      })
-    );
-  }
-});
-
-document.getElementById("reloop-btn").addEventListener("click", () => {
-  if (!loopRegion) return; // button is disabled in this state anyway
-  if (loopRegion.active) {
-    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: false }));
-  } else {
-    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: true }));
-    // A plain seek preserves whatever play state currently holds: playing
-    // -> plays the loop from the cue point; paused -> stays paused there.
-    sendSeekRequest(cuePointUs);
-  }
-});
-
-/// Called from waveform.js (a separate `type="module"` script, so it can't
-/// see this classic script's `ws`/`randomId` directly) whenever the user
-/// clicks/drags the waveform to seek. Exposed on `window` deliberately,
-/// since a classic script's top-level functions are already global but the
-/// cross-file dependency is easy to miss without a pointer here.
-function sendSeekRequest(positionUs) {
-  ws.send(JSON.stringify({ type: "seek_request", request_id: `request-${randomId()}`, position_us: positionUs }));
-}
-window.sendSeekRequest = sendSeekRequest;
-// Read by waveform.js's "decode" handler to re-apply the cue marker/loop
-// region onto a newly-loaded file - same explicit-bridge convention as
-// sendSeekRequest, in the opposite direction.
-window.getCuePointUs = () => cuePointUs;
-window.getLoopRegion = () => loopRegion;
 document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });
 document.getElementById("resync-btn").addEventListener("click", () => runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT));
-document.getElementById("nudge-enabled-checkbox").addEventListener("change", (e) => {
-  const desired = e.target.checked;
-  // This is a room-wide synced setting, not a local toggle: revert the
-  // browser's own optimistic checkbox flip and wait for the canonical
-  // nudge_setting_changed event (or someone else's request) to actually
-  // apply it - same "server is authoritative" pattern as play/pause/restart.
-  e.target.checked = nudgeEnabled;
-  ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, enabled: desired }));
-});
-document.getElementById("drift-calibration-checkbox").addEventListener("change", (e) => {
-  // Local-only setting: no server round-trip, applies immediately - this is
-  // a per-browser calibration preference, not something the room agrees on.
-  driftCalibrationEnabled = e.target.checked;
-  if (fastCalibrationCorrectionActive) {
-    fastCalibrationCorrectionActive = false;
-    setSourceRate(transport.playback_rate);
-  }
-  if (driftCalibrationEnabled) {
-    // Re-arm: forget whatever was learned before and measure fresh, in case
-    // conditions changed while this was off (different output device, etc).
-    // Reset driftCalibrationArmedAtCtxTime to null rather than "now" - let
-    // whichever mechanism starts next (the probe below, or a real playback
-    // segment's own measurement) do the arming itself.
-    driftCalibrationOffsetUs = null;
-    driftCalibrationSumUs = 0;
-    driftCalibrationSampleCount = 0;
-    driftCalibrationArmedAtCtxTime = null;
-    driftCalibrationProbeStarted = false;
-    if (audioCtx) runDriftCalibrationProbe(); // nothing to lose starting one immediately if we already can
-  }
-  log(`drift calibration ${driftCalibrationEnabled ? "enabled" : "disabled"} (local only)`);
-});
-{
-  const bpmEngineSelectEl = document.getElementById("bpm-engine-select");
-  bpmEngineSelectEl.value = bpmEngine; // restore the cookie-remembered choice (default "wabd" if none saved yet)
-  bpmEngineSelectEl.addEventListener("change", (e) => {
-    // Local-only setting, like driftCalibrationEnabled above: no server
-    // round-trip, and remembered across visits via a cookie rather than a
-    // synced room-wide preference.
-    bpmEngine = e.target.value;
-    setCookie("bpm_engine", bpmEngine);
-    log(`BPM detection engine changed to ${bpmEngine} (local only)`);
-    if (audioBuffer) startBpmDetection(audioBuffer); // re-run on the currently loaded file so the two engines are easy to compare
-  });
-}
-document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
-  const desired = e.target.checked;
-  e.target.checked = bassCutEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge
-  ws.send(JSON.stringify({ type: "set_bass_cut_enabled", request_id: `request-${randomId()}`, enabled: desired }));
-});
-document.getElementById("pitch-lock-checkbox").addEventListener("change", (e) => {
-  const desired = e.target.checked;
-  e.target.checked = pitchLockEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge/bass-cut
-  ws.send(JSON.stringify({ type: "set_pitch_lock_enabled", request_id: `request-${randomId()}`, enabled: desired }));
-});
-{
-  const tempoSliderEl = document.getElementById("tempo-slider");
-
-  // While *we* are the one moving the fader, our own DOM value is the
-  // immediate source of truth - the render loop skips it entirely (see
-  // isDraggingLocally in renderTempoFader). pointerdown/pointerup bracket
-  // the interaction; "change" is the authoritative completion signal.
-  tempoSliderEl.addEventListener("pointerdown", () => { isDraggingLocally = true; });
-  tempoSliderEl.addEventListener("pointerup", () => { isDraggingLocally = false; });
-  tempoSliderEl.addEventListener("pointercancel", () => { isDraggingLocally = false; });
-
-  tempoSliderEl.addEventListener("input", (e) => {
-    const rate = parseFloat(e.target.value);
-    document.getElementById("tempo-readout").textContent = formatTempoPercent(rate);
-    updateBpmDisplay(rate);
-    sendTempoSample(rate, false); // throttled - fine to call on every event
-  });
-
-  tempoSliderEl.addEventListener("change", (e) => {
-    // Fires on release / completion (including each discrete keyboard step).
-    // Always send the settled value right away, bypassing the throttle.
-    sendTempoSample(parseFloat(e.target.value), true);
-    isDraggingLocally = false;
-  });
-}
 
 // ---- live position readout & drift smoothing ------------------------------
 
 let lastTickTimeMs = null;
 
-function tick() {
+function globalTick() {
   const nowMs = performance.now();
   const dtS = lastTickTimeMs === null ? 0 : (nowMs - lastTickTimeMs) / 1000;
   lastTickTimeMs = nowMs;
 
   const nowServerUs = estimateServerTimeUs();
-  if (nowServerUs !== null) {
-    const positionUs = currentModelPositionUs(nowServerUs);
-    document.getElementById("position-readout").textContent = `${(positionUs / 1e6).toFixed(3)}s`;
-    if (audioBuffer) {
-      document.getElementById("position-bar").max = audioBuffer.duration;
-      document.getElementById("position-bar").value = positionUs / 1e6;
-      // Drives the waveform's visual playhead from the same shared model
-      // position, same as position-bar above. setTime() never emits
-      // wavesurfer's "interaction" event (only genuine clicks/drags do - see
-      // waveform.js), so this can't loop back into a seek request.
-      window.waveSurfer?.setTime(positionUs / 1e6);
-    }
-
-    const audioPositionUs = transport.playing ? currentAudioPositionUs() : null;
-    if (audioPositionUs === null) {
-      document.getElementById("m-drift").textContent = "-";
-      document.getElementById("m-drift-smoothed").textContent = "-";
-      smoothedDriftUs = null;
-      updateNudge(null);
-    } else {
-      const rawDriftUs = audioPositionUs - positionUs;
-      document.getElementById("m-drift").textContent = Math.round(rawDriftUs);
-
-      if (!driftCalibrationEnabled) {
-        // Calibration off: original behaviour - the nudge reacts directly
-        // to raw (uncalibrated) drift, for A/B comparison against the
-        // calibrated path below.
-        const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
-        smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
-        document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
-        updateNudge(smoothedDriftUs);
-      } else if (driftCalibrationOffsetUs === null) {
-        // Still learning this session's fixed bias - possibly pooling
-        // samples with a background probe already in flight (see
-        // recordDriftCalibrationSample). Don't let the gentle nudge react
-        // to the still-uncalibrated raw number in the meantime.
-        document.getElementById("m-drift-smoothed").textContent = "calibrating...";
-        recordDriftCalibrationSample(rawDriftUs);
-        updateNudge(null);
-      } else if (fastCalibrationCorrectionActive) {
-        // A real rate correction is already closing the known gap - let it
-        // finish rather than having the gentle nudge fight it.
-        if (audioCtx.currentTime >= fastCalibrationCorrectionEndCtxTime) {
-          fastCalibrationCorrectionActive = false;
-          setSourceRate(transport.playback_rate);
-          log("fast drift-calibration correction complete; resuming normal nudge monitoring");
-        } else {
-          document.getElementById("m-drift-smoothed").textContent = "correcting...";
-          document.getElementById("m-nudge").textContent = `fast calibration correction (rate ${currentSourceRate.toFixed(4)})`;
-        }
-      } else {
-        // By this point a REAL correction has already been applied - either
-        // the fast burst just finished (this segment), or the known offset
-        // was baked into scheduling before this segment even started (see
-        // scheduleAudioAction). Either way rawDriftUs should already be
-        // near zero on its own; subtracting driftCalibrationOffsetUs again
-        // here would double-count a correction that's already been made
-        // physically, not just mathematically (this was a real bug: it
-        // produced a phantom drift equal to the offset with the sign
-        // flipped, which the nudge then "corrected" - actively re-breaking
-        // sync it had just fixed).
-        // Exponential moving average with a ~1s time constant - flattens the
-        // frame-to-frame measurement noise (see the nudge section above) while
-        // still tracking genuine drift trends within a few seconds.
-        const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
-        smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
-        document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
-        updateNudge(smoothedDriftUs);
-      }
-    }
-  }
-  renderTempoFader();
-  requestAnimationFrame(tick);
+  deckA.tick(dtS, nowServerUs);
+  deckB.tick(dtS, nowServerUs);
+  requestAnimationFrame(globalTick);
 }
-requestAnimationFrame(tick);
+requestAnimationFrame(globalTick);
 
-document.getElementById("m-tempo-delay").textContent = (TEMPO_INTERPOLATION_DELAY_US / 1000).toFixed(0);
-setInterval(() => {
-  document.getElementById("m-tempo-send-rate").textContent = `${tempoSamplesSentInWindow}/s`;
-  tempoSamplesSentInWindow = 0;
-}, 1000);
-
-// A slower, logged trace of the smoothed drift + nudge status so it's
-// visible in the timestamped log panel too - useful when comparing several
-// open tabs after the fact, not just watching the live numbers.
-const PLAYBACK_DRIFT_LOG_INTERVAL_MS = 5_000;
-setInterval(() => {
-  if (smoothedDriftUs === null) return;
-  const nudgeText = nudgeDirection === 0 ? "no correction" : nudgeDirection > 0 ? "speeding up" : "slowing down";
-  log(`playback drift (smoothed): audio is ${smoothedDriftUs >= 0 ? "ahead of" : "behind"} model by ${Math.abs(Math.round(smoothedDriftUs))}us - ${nudgeText}`);
-}, PLAYBACK_DRIFT_LOG_INTERVAL_MS);
-
-// Kick off the background drift-calibration probe as early as the browser's
-// autoplay policy allows - a real user gesture (this app doesn't use
-// AudioContext before one anyway). Whichever fires first wins;
-// runDriftCalibrationProbe() itself is idempotent, so calling it from here
-// AND from the file-input handler above is safe.
+// Kick off both decks' background drift-calibration probes as early as the
+// browser's autoplay policy allows - a real user gesture (this app doesn't
+// use AudioContext before one anyway). Whichever fires first wins;
+// runDriftCalibrationProbe() itself is idempotent per deck.
 function armDriftCalibrationProbeOnFirstInteraction() {
   const trigger = () => {
     window.removeEventListener("pointerdown", trigger);
     window.removeEventListener("keydown", trigger);
-    runDriftCalibrationProbe();
+    deckA.runDriftCalibrationProbe();
+    deckB.runDriftCalibrationProbe();
   };
   window.addEventListener("pointerdown", trigger, { once: true });
   window.addEventListener("keydown", trigger, { once: true });

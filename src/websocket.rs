@@ -12,8 +12,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::clock::Clock;
-use crate::protocol::{ClientMessage, LoopRegionDto, ServerMessage};
-use crate::room::RoomState;
+use crate::protocol::{ClientMessage, DeckId, DeckStateDto, LoopRegionDto, ServerMessage};
+use crate::room::{DeckState, RoomState};
 
 /// Bound on how many recent request IDs are remembered for deduplication.
 const DEDUP_CACHE_CAPACITY: usize = 256;
@@ -170,17 +170,26 @@ async fn send_welcome_and_snapshot(
     let _ = outbound_tx.send(snapshot).await;
 }
 
+fn deck_state_dto(deck: &DeckState) -> DeckStateDto {
+    DeckStateDto {
+        revision: deck.revision,
+        transport: deck.transport.to_dto(),
+        nudge_enabled: deck.nudge_enabled,
+        bass_cut_enabled: deck.bass_cut_enabled,
+        pitch_lock_enabled: deck.pitch_lock_enabled,
+        cue_point_us: deck.cue_point_us,
+        loop_region: deck
+            .loop_region
+            .map(|l| LoopRegionDto { start_us: l.start_us, end_us: l.end_us, active: l.active }),
+    }
+}
+
 async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
     let room = state.room.lock().await;
     ServerMessage::StateSnapshot {
         server_time_us: state.clock.now_us(),
-        revision: room.revision,
-        transport: room.transport.to_dto(),
-        nudge_enabled: room.nudge_enabled,
-        bass_cut_enabled: room.bass_cut_enabled,
-        pitch_lock_enabled: room.pitch_lock_enabled,
-        cue_point_us: room.cue_point_us,
-        loop_region: room.loop_region.map(|l| LoopRegionDto { start_us: l.start_us, end_us: l.end_us, active: l.active }),
+        deck_a: deck_state_dto(&room.deck_a),
+        deck_b: deck_state_dto(&room.deck_b),
     }
 }
 
@@ -237,38 +246,39 @@ async fn handle_client_message(
             let snapshot = build_snapshot(state).await;
             let _ = outbound_tx.send(snapshot).await;
         }
-        ClientMessage::TransportRequest { request_id, action } => {
-            handle_transport_request(request_id, action, state, connection_id, outbound_tx).await;
+        ClientMessage::TransportRequest { request_id, deck, action } => {
+            handle_transport_request(request_id, deck, action, state, connection_id, outbound_tx).await;
         }
-        ClientMessage::SetNudgeEnabled { request_id, enabled } => {
-            handle_set_nudge_enabled(request_id, enabled, state, connection_id).await;
+        ClientMessage::SetNudgeEnabled { request_id, deck, enabled } => {
+            handle_set_nudge_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SetTempoRequest { request_id, playback_rate } => {
-            handle_set_tempo_request(request_id, playback_rate, state, connection_id).await;
+        ClientMessage::SetTempoRequest { request_id, deck, playback_rate } => {
+            handle_set_tempo_request(request_id, deck, playback_rate, state, connection_id).await;
         }
-        ClientMessage::SetBassCutEnabled { request_id, enabled } => {
-            handle_set_bass_cut_enabled(request_id, enabled, state, connection_id).await;
+        ClientMessage::SetBassCutEnabled { request_id, deck, enabled } => {
+            handle_set_bass_cut_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SetPitchLockEnabled { request_id, enabled } => {
-            handle_set_pitch_lock_enabled(request_id, enabled, state, connection_id).await;
+        ClientMessage::SetPitchLockEnabled { request_id, deck, enabled } => {
+            handle_set_pitch_lock_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SeekRequest { request_id, position_us } => {
-            handle_seek_request(request_id, position_us, state, connection_id).await;
+        ClientMessage::SeekRequest { request_id, deck, position_us } => {
+            handle_seek_request(request_id, deck, position_us, state, connection_id).await;
         }
-        ClientMessage::SetCuePoint { request_id, position_us } => {
-            handle_set_cue_point(request_id, position_us, state, connection_id).await;
+        ClientMessage::SetCuePoint { request_id, deck, position_us } => {
+            handle_set_cue_point(request_id, deck, position_us, state, connection_id).await;
         }
-        ClientMessage::SetLoop { request_id, start_us, end_us } => {
-            handle_set_loop(request_id, start_us, end_us, state, connection_id).await;
+        ClientMessage::SetLoop { request_id, deck, start_us, end_us } => {
+            handle_set_loop(request_id, deck, start_us, end_us, state, connection_id).await;
         }
-        ClientMessage::SetLoopActive { request_id, active } => {
-            handle_set_loop_active(request_id, active, state, connection_id).await;
+        ClientMessage::SetLoopActive { request_id, deck, active } => {
+            handle_set_loop_active(request_id, deck, active, state, connection_id).await;
         }
     }
 }
 
 async fn handle_transport_request(
     request_id: String,
+    deck: DeckId,
     action: crate::protocol::TransportAction,
     state: &Arc<AppState>,
     connection_id: Uuid,
@@ -285,18 +295,19 @@ async fn handle_transport_request(
     let received_server_time_us = state.clock.now_us();
     let event_data = {
         let mut room = state.room.lock().await;
+        let deck_state = room.deck_mut(deck);
         match action {
             crate::protocol::TransportAction::Play => {
-                room.schedule_play(received_server_time_us, state.schedule_lead_time_us)
+                deck_state.schedule_play(received_server_time_us, state.schedule_lead_time_us)
             }
             crate::protocol::TransportAction::Pause => {
-                room.schedule_pause(received_server_time_us, state.schedule_lead_time_us)
+                deck_state.schedule_pause(received_server_time_us, state.schedule_lead_time_us)
             }
             crate::protocol::TransportAction::Restart => {
-                room.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
+                deck_state.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
             }
             crate::protocol::TransportAction::CueRelease => {
-                room.schedule_cue_release(received_server_time_us, state.schedule_lead_time_us)
+                deck_state.schedule_cue_release(received_server_time_us, state.schedule_lead_time_us)
             }
             crate::protocol::TransportAction::SetTempo => {
                 drop(room);
@@ -330,6 +341,7 @@ async fn handle_transport_request(
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         action = ?action,
         received_server_time_us,
         effective_server_time_us = event_data.effective_server_time_us,
@@ -343,6 +355,7 @@ async fn handle_transport_request(
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         action,
         effective_server_time_us: event_data.effective_server_time_us,
@@ -357,6 +370,7 @@ async fn handle_transport_request(
 
 async fn handle_set_nudge_enabled(
     request_id: String,
+    deck: DeckId,
     enabled: bool,
     state: &Arc<AppState>,
     connection_id: Uuid,
@@ -371,7 +385,7 @@ async fn handle_set_nudge_enabled(
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.set_nudge_enabled(enabled)
+        room.deck_mut(deck).set_nudge_enabled(enabled)
     };
 
     let event_id = Uuid::new_v4();
@@ -380,6 +394,7 @@ async fn handle_set_nudge_enabled(
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         enabled,
         revision = event_data.revision,
         connected_client_count,
@@ -390,6 +405,7 @@ async fn handle_set_nudge_enabled(
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         enabled: event_data.enabled,
     };
@@ -399,6 +415,7 @@ async fn handle_set_nudge_enabled(
 
 async fn handle_set_tempo_request(
     request_id: String,
+    deck: DeckId,
     playback_rate: f64,
     state: &Arc<AppState>,
     connection_id: Uuid,
@@ -414,7 +431,8 @@ async fn handle_set_tempo_request(
     let received_server_time_us = state.clock.now_us();
     let event_data = {
         let mut room = state.room.lock().await;
-        room.schedule_playback_rate(received_server_time_us, TEMPO_SAMPLE_LEAD_TIME_US, playback_rate)
+        room.deck_mut(deck)
+            .schedule_playback_rate(received_server_time_us, TEMPO_SAMPLE_LEAD_TIME_US, playback_rate)
     };
 
     let event_id = Uuid::new_v4();
@@ -423,6 +441,7 @@ async fn handle_set_tempo_request(
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         playback_rate,
         received_server_time_us,
         effective_server_time_us = event_data.effective_server_time_us,
@@ -436,6 +455,7 @@ async fn handle_set_tempo_request(
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         action: event_data.action,
         effective_server_time_us: event_data.effective_server_time_us,
@@ -446,7 +466,13 @@ async fn handle_set_tempo_request(
     let _ = state.events.send(event);
 }
 
-async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_seek_request(
+    request_id: String,
+    deck: DeckId,
+    position_us: u64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -458,7 +484,8 @@ async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<A
     let received_server_time_us = state.clock.now_us();
     let event_data = {
         let mut room = state.room.lock().await;
-        room.schedule_seek(received_server_time_us, state.schedule_lead_time_us, position_us)
+        room.deck_mut(deck)
+            .schedule_seek(received_server_time_us, state.schedule_lead_time_us, position_us)
     };
 
     let event_id = Uuid::new_v4();
@@ -467,6 +494,7 @@ async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<A
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         position_us,
         received_server_time_us,
         effective_server_time_us = event_data.effective_server_time_us,
@@ -479,6 +507,7 @@ async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<A
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         action: event_data.action,
         effective_server_time_us: event_data.effective_server_time_us,
@@ -489,7 +518,13 @@ async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<A
     let _ = state.events.send(event);
 }
 
-async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_set_cue_point(
+    request_id: String,
+    deck: DeckId,
+    position_us: u64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -500,7 +535,7 @@ async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.set_cue_point(position_us)
+        room.deck_mut(deck).set_cue_point(position_us)
     };
 
     let event_id = Uuid::new_v4();
@@ -509,6 +544,7 @@ async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         position_us,
         revision = event_data.revision,
         connected_client_count,
@@ -519,6 +555,7 @@ async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         position_us: event_data.position_us,
     };
@@ -526,11 +563,18 @@ async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<
     let _ = state.events.send(event);
 }
 
-/// Inserts/overwrites the room's loop, broadcasting two separate events
-/// (CuePointChanged, then LoopChanged) since `RoomState::set_loop` bumps
+/// Inserts/overwrites a deck's loop, broadcasting two separate events
+/// (CuePointChanged, then LoopChanged) since `DeckState::set_loop` bumps
 /// the revision twice - one message can't carry two revision bumps without
 /// the second failing every client's own staleness check.
-async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_set_loop(
+    request_id: String,
+    deck: DeckId,
+    start_us: u64,
+    end_us: u64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -541,7 +585,7 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
 
     let (cue_event, loop_event) = {
         let mut room = state.room.lock().await;
-        room.set_loop(start_us, end_us)
+        room.deck_mut(deck).set_loop(start_us, end_us)
     };
 
     let connected_client_count = state.connection_count.load(Ordering::SeqCst);
@@ -551,6 +595,7 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
         event_id = %cue_event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         position_us = cue_event.position_us,
         revision = cue_event.revision,
         connected_client_count,
@@ -560,6 +605,7 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
         event_id: cue_event_id,
         request_id: request_id.clone(),
         origin_connection_id: connection_id,
+        deck,
         revision: cue_event.revision,
         position_us: cue_event.position_us,
     });
@@ -569,6 +615,7 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
         event_id = %loop_event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         start_us = loop_event.start_us,
         end_us = loop_event.end_us,
         active = loop_event.active,
@@ -580,6 +627,7 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
         event_id: loop_event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: loop_event.revision,
         start_us: loop_event.start_us,
         end_us: loop_event.end_us,
@@ -587,7 +635,13 @@ async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: 
     });
 }
 
-async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_set_loop_active(
+    request_id: String,
+    deck: DeckId,
+    active: bool,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -598,11 +652,11 @@ async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<Ap
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.set_loop_active(active)
+        room.deck_mut(deck).set_loop_active(active)
     };
 
     let Some(event_data) = event_data else {
-        debug!(%request_id, %connection_id, "set_loop_active ignored: no loop exists yet");
+        debug!(%request_id, %connection_id, ?deck, "set_loop_active ignored: no loop exists yet");
         return;
     };
 
@@ -612,6 +666,7 @@ async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<Ap
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         active,
         revision = event_data.revision,
         connected_client_count,
@@ -622,6 +677,7 @@ async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<Ap
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         start_us: event_data.start_us,
         end_us: event_data.end_us,
@@ -633,6 +689,7 @@ async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<Ap
 
 async fn handle_set_bass_cut_enabled(
     request_id: String,
+    deck: DeckId,
     enabled: bool,
     state: &Arc<AppState>,
     connection_id: Uuid,
@@ -647,7 +704,7 @@ async fn handle_set_bass_cut_enabled(
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.set_bass_cut_enabled(enabled)
+        room.deck_mut(deck).set_bass_cut_enabled(enabled)
     };
 
     let event_id = Uuid::new_v4();
@@ -656,6 +713,7 @@ async fn handle_set_bass_cut_enabled(
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         enabled,
         revision = event_data.revision,
         connected_client_count,
@@ -666,6 +724,7 @@ async fn handle_set_bass_cut_enabled(
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         enabled: event_data.enabled,
     };
@@ -675,6 +734,7 @@ async fn handle_set_bass_cut_enabled(
 
 async fn handle_set_pitch_lock_enabled(
     request_id: String,
+    deck: DeckId,
     enabled: bool,
     state: &Arc<AppState>,
     connection_id: Uuid,
@@ -689,7 +749,7 @@ async fn handle_set_pitch_lock_enabled(
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.set_pitch_lock_enabled(enabled)
+        room.deck_mut(deck).set_pitch_lock_enabled(enabled)
     };
 
     let event_id = Uuid::new_v4();
@@ -698,6 +758,7 @@ async fn handle_set_pitch_lock_enabled(
         %event_id,
         request_id = %request_id,
         %connection_id,
+        ?deck,
         enabled,
         revision = event_data.revision,
         connected_client_count,
@@ -708,6 +769,7 @@ async fn handle_set_pitch_lock_enabled(
         event_id,
         request_id,
         origin_connection_id: connection_id,
+        deck,
         revision: event_data.revision,
         enabled: event_data.enabled,
     };
