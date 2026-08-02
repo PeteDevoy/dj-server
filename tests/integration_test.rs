@@ -258,6 +258,71 @@ async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
 }
 
 #[tokio::test]
+async fn cue_point_set_and_released_syncs_to_both_clients() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["cue_point_us"], Value::Null);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-play", "action": "play"}),
+    )
+    .await;
+    let _ = recv_until(&mut client_a, "transport_event").await;
+    let _ = recv_until(&mut client_b, "transport_event").await;
+
+    // B sets a cue point while A never touches anything.
+    send_json(
+        &mut client_b,
+        json!({"type": "set_cue_point", "request_id": "req-cue-set", "position_us": 6_000_000}),
+    )
+    .await;
+    let cue_a = recv_until(&mut client_a, "cue_point_changed").await;
+    let cue_b = recv_until(&mut client_b, "cue_point_changed").await;
+    assert_eq!(cue_a["event_id"], cue_b["event_id"]);
+    assert_eq!(cue_a["position_us"], 6_000_000);
+    assert_eq!(cue_a["revision"], 2);
+
+    // Both clients agree on the cue point via a fresh snapshot.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-cue-set"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["cue_point_us"], 6_000_000);
+    assert_eq!(snapshot["transport"]["playing"], true); // setting a cue point must not affect playback
+
+    // A releases the cue (still playing) - transport must pause exactly at
+    // the cue point, broadcast to both, without either client having to
+    // supply the position themselves.
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-cue-release", "action": "cue_release"}),
+    )
+    .await;
+    let release_a = recv_until(&mut client_a, "transport_event").await;
+    let release_b = recv_until(&mut client_b, "transport_event").await;
+    assert_eq!(release_a["event_id"], release_b["event_id"]);
+    assert_eq!(release_a["action"], "cue_release");
+    assert_eq!(release_a["position_us"], 6_000_000);
+    assert_eq!(release_a["revision"], 3);
+
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-cue-release"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["transport"]["playing"], false);
+    assert_eq!(snapshot["transport"]["anchor_position_us"], 6_000_000);
+}
+
+#[tokio::test]
 async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

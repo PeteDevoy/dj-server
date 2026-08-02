@@ -66,6 +66,14 @@ pub struct BoolSettingEventData {
     pub idempotent_replay: bool,
 }
 
+/// The outcome of setting/overwriting the room's single cue point, ready to
+/// be turned into `ServerMessage::CuePointChanged`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CuePointEventData {
+    pub position_us: u64,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomState {
     pub transport: TransportState,
@@ -79,6 +87,11 @@ pub struct RoomState {
     /// Whether clients should pitch-correct tempo changes. Same
     /// shared-revision convention as nudge_enabled.
     pub pitch_lock_enabled: bool,
+    /// The room's single cue point, or `None` if nothing's been set yet.
+    /// Same shared-revision convention as the settings above. There is
+    /// deliberately no way to clear it back to `None` once set - only to
+    /// overwrite it with a new position (see `set_cue_point`).
+    pub cue_point_us: Option<u64>,
     pub revision: u64,
 }
 
@@ -89,6 +102,7 @@ impl RoomState {
             nudge_enabled: true,
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
+            cue_point_us: None,
             revision: 0,
         }
     }
@@ -152,6 +166,21 @@ impl RoomState {
             enabled,
             revision: self.revision,
             idempotent_replay: false,
+        }
+    }
+
+    /// Sets (or overwrites) the room's single cue point. Unlike the boolean
+    /// settings above, this is not idempotent-by-value: setting it to the
+    /// same position it already holds still counts as a fresh action and
+    /// bumps the revision, mirroring `schedule_restart`/`schedule_seek`
+    /// (this is a discrete user action - "set a cue point here" - not a
+    /// settings toggle where redundant no-op requests should be absorbed).
+    pub fn set_cue_point(&mut self, position_us: u64) -> CuePointEventData {
+        self.cue_point_us = Some(position_us);
+        self.revision += 1;
+        CuePointEventData {
+            position_us,
+            revision: self.revision,
         }
     }
 
@@ -247,6 +276,41 @@ impl RoomState {
             action: TransportAction::Seek,
             effective_server_time_us: effective_time_us,
             position_us,
+            playback_rate: self.transport.playback_rate,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
+
+    /// Releases a cue-point preview hold `lead_time_us` in the future:
+    /// pauses the transport at whatever `cue_point_us` currently holds. The
+    /// server is the sole source of truth for that position - unlike
+    /// `schedule_seek`, callers never supply one. If no cue point has been
+    /// set yet, this is a no-op (idempotent_replay) rather than a panic,
+    /// since there's nothing sensible to release to.
+    pub fn schedule_cue_release(&mut self, now_us: ServerTimeUs, lead_time_us: u64) -> TransportEventData {
+        let Some(cue_position_us) = self.cue_point_us else {
+            return TransportEventData {
+                action: TransportAction::CueRelease,
+                effective_server_time_us: self.transport.anchor_server_time_us,
+                position_us: self.transport.anchor_position_us,
+                playback_rate: self.transport.playback_rate,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        };
+
+        let effective_time_us = now_us + lead_time_us;
+
+        self.transport.playing = false;
+        self.transport.anchor_position_us = cue_position_us;
+        self.transport.anchor_server_time_us = effective_time_us;
+        self.revision += 1;
+
+        TransportEventData {
+            action: TransportAction::CueRelease,
+            effective_server_time_us: effective_time_us,
+            position_us: cue_position_us,
             playback_rate: self.transport.playback_rate,
             revision: self.revision,
             idempotent_replay: false,
@@ -493,6 +557,67 @@ mod tests {
 
         assert_eq!(room.revision, revision_after_first_seek + 1);
         assert!(!event.idempotent_replay);
+    }
+
+    #[test]
+    fn cue_point_defaults_to_none() {
+        let room = RoomState::new();
+        assert_eq!(room.cue_point_us, None);
+    }
+
+    #[test]
+    fn set_cue_point_stores_position_and_bumps_revision() {
+        let mut room = RoomState::new();
+        let revision_before = room.revision;
+
+        let event = room.set_cue_point(6_000_000);
+
+        assert_eq!(event.position_us, 6_000_000);
+        assert_eq!(room.cue_point_us, Some(6_000_000));
+        assert_eq!(room.revision, revision_before + 1);
+    }
+
+    #[test]
+    fn set_cue_point_overwrites_and_bumps_revision_even_to_the_same_position() {
+        let mut room = RoomState::new();
+        room.set_cue_point(6_000_000);
+        let revision_after_first_set = room.revision;
+
+        let event = room.set_cue_point(6_000_000);
+
+        assert_eq!(room.revision, revision_after_first_set + 1);
+        assert_eq!(event.position_us, 6_000_000);
+
+        room.set_cue_point(9_000_000);
+        assert_eq!(room.cue_point_us, Some(9_000_000));
+    }
+
+    #[test]
+    fn schedule_cue_release_pauses_at_the_cue_point() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.set_cue_point(6_000_000);
+
+        let event = room.schedule_cue_release(1_000_000, 150_000);
+
+        assert_eq!(event.action, TransportAction::CueRelease);
+        assert_eq!(event.position_us, 6_000_000);
+        assert!(!room.transport.playing);
+        assert_eq!(room.transport.anchor_position_us, 6_000_000);
+        assert!(!event.idempotent_replay);
+    }
+
+    #[test]
+    fn schedule_cue_release_with_no_cue_point_is_a_no_op() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        let revision_before = room.revision;
+
+        let event = room.schedule_cue_release(1_000_000, 150_000);
+
+        assert!(event.idempotent_replay);
+        assert!(room.transport.playing); // untouched
+        assert_eq!(room.revision, revision_before);
     }
 
     #[test]

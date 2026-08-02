@@ -23,6 +23,15 @@ pub enum TransportAction {
     /// Changes the canonical playback rate without changing whether it's
     /// playing or paused.
     SetTempo,
+    /// Releases a cue-point preview hold: pauses the transport at whatever
+    /// `RoomState.cue_point_us` currently holds. Carries no data of its own
+    /// (unlike `Seek`) since the server is already the sole source of truth
+    /// for the cue point's position - the client never needs to (and
+    /// can't) tell it what position to release to, which is exactly what
+    /// keeps "only one cue point at a time" trivially true. Dispatched
+    /// through the plain `TransportRequest` path like `Restart`, not a
+    /// dedicated message like `Seek`/`SetTempo`.
+    CueRelease,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +88,14 @@ pub enum ClientMessage {
         request_id: String,
         position_us: u64,
     },
+    /// Sets (or overwrites) the room's single cue point at an arbitrary
+    /// position, synced room-wide like play/pause/seek - e.g. pressing Cue
+    /// while paused. A dedicated message like `SeekRequest`, since it
+    /// carries a position `TransportAction` has no room for.
+    SetCuePoint {
+        request_id: String,
+        position_us: u64,
+    },
 }
 
 impl ClientMessage {
@@ -92,6 +109,7 @@ impl ClientMessage {
             ClientMessage::SetBassCutEnabled { request_id, .. } => request_id,
             ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
             ClientMessage::SeekRequest { request_id, .. } => request_id,
+            ClientMessage::SetCuePoint { request_id, .. } => request_id,
         }
     }
 
@@ -131,6 +149,7 @@ pub enum ServerMessage {
         nudge_enabled: bool,
         bass_cut_enabled: bool,
         pitch_lock_enabled: bool,
+        cue_point_us: Option<u64>,
     },
     ClockResponse {
         request_id: String,
@@ -168,6 +187,16 @@ pub enum ServerMessage {
         origin_connection_id: Uuid,
         revision: u64,
         enabled: bool,
+    },
+    /// Broadcast whenever the room's single cue point is set or overwritten
+    /// (see `ClientMessage::SetCuePoint`). Shares the transport's revision
+    /// counter, like the other *SettingChanged events.
+    CuePointChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        position_us: u64,
     },
     Error {
         request_id: Option<String>,
@@ -230,6 +259,47 @@ mod tests {
             ClientMessage::SeekRequest { request_id, position_us } => {
                 assert_eq!(request_id, "request-101");
                 assert_eq!(position_us, 4_500_000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn deserializes_set_cue_point() {
+        let json = r#"{"type":"set_cue_point","request_id":"request-104","position_us":6000000}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetCuePoint { request_id, position_us } => {
+                assert_eq!(request_id, "request-104");
+                assert_eq!(position_us, 6_000_000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_cue_point_changed() {
+        let msg = ServerMessage::CuePointChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-104".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 3,
+            position_us: 6_000_000,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "cue_point_changed");
+        assert_eq!(json["position_us"], 6_000_000);
+        assert_eq!(json["revision"], 3);
+    }
+
+    #[test]
+    fn deserializes_transport_request_cue_release() {
+        let json = r#"{"type":"transport_request","request_id":"request-105","action":"cue_release"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::TransportRequest { request_id, action } => {
+                assert_eq!(request_id, "request-105");
+                assert_eq!(action, TransportAction::CueRelease);
             }
             _ => panic!("wrong variant"),
         }
@@ -329,6 +399,7 @@ mod tests {
             nudge_enabled: true,
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
+            cue_point_us: Some(6_000_000),
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
@@ -336,6 +407,7 @@ mod tests {
         assert_eq!(json["nudge_enabled"], true);
         assert_eq!(json["bass_cut_enabled"], false);
         assert_eq!(json["pitch_lock_enabled"], true);
+        assert_eq!(json["cue_point_us"], 6_000_000);
     }
 
     #[test]

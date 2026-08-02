@@ -30,9 +30,9 @@
 
 <section>
   <strong>2. Transport</strong><br>
-  <button id="play-btn" disabled>Play</button>
-  <button id="pause-btn" disabled>Pause</button>
+  <button id="play-pause-btn" disabled>Play / Pause</button>
   <button id="restart-btn" disabled>⏮ Skip back</button>
+  <button id="cue-btn" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
   <button id="state-btn" disabled>Refresh state</button>
   <button id="resync-btn" disabled>Resync clock</button>
   <p>
@@ -416,6 +416,26 @@ function currentModelPositionUs(nowServerUs) {
   return transport.anchor_position_us + elapsed * transport.playback_rate;
 }
 
+// ---- cue point -------------------------------------------------------------
+//
+// Room-wide synced, like play/pause/seek (not a local-only setting): every
+// connected client agrees on where the single cue point is, and pressing or
+// holding Cue is audible to the whole room, same as any other transport
+// action - see set_cue_point/cue_point_changed and the cue_release
+// transport action in the server protocol.
+let cuePointUs = null; // null until a cue point has ever been set this session
+let cuePreviewActive = false; // true between pointerdown and pointerup while holding Cue at the cue point
+
+/// The Cue button is disabled while playing with no cue point set yet
+/// (nothing to jump to) - otherwise enabled whenever connected, since every
+/// other state (paused anywhere, paused at the cue point, playing with a
+/// cue point) has a defined action.
+function updateCueButtonUi() {
+  const btn = document.getElementById("cue-btn");
+  const connected = ws && ws.readyState === WebSocket.OPEN;
+  btn.disabled = !connected || (transport.playing && cuePointUs === null);
+}
+
 /// Displays a playback_rate (0.94-1.06, where 1.0 is "no change") as a
 /// signed offset from 0% rather than an absolute percentage - the slider
 /// itself still runs on the raw rate underneath (min/max/value are
@@ -578,6 +598,7 @@ function setStatusUi() {
   document.getElementById("tempo-slider").value = transport.playback_rate;
   document.getElementById("tempo-readout").textContent = formatTempoPercent(transport.playback_rate);
   updateBpmDisplay(transport.playback_rate);
+  updateCueButtonUi();
 }
 
 // ---- playback drift correction (tempo nudge) -----------------------------
@@ -1082,12 +1103,26 @@ function applySnapshot(msg) {
   applyNudgeEnabled(msg.nudge_enabled);
   applyBassCutEnabled(msg.bass_cut_enabled);
   applyPitchLockEnabled(msg.pitch_lock_enabled);
+  cuePointUs = msg.cue_point_us;
+  window.updateCueMarker?.(cuePointUs);
   // A reconnect starts a fresh timeline - any buffered tempo samples belong
   // to a session that no longer exists, so drop them rather than let stale
   // pre-reconnect data leak into a post-reconnect interpolated render.
   tempoSampleBuffer = [];
   setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled})`);
+  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled}, cue_point_us=${msg.cue_point_us})`);
+}
+
+function applyCuePointEvent(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    log(`ignoring stale/duplicate cue_point_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  cuePointUs = msg.position_us;
+  window.updateCueMarker?.(cuePointUs);
+  updateCueButtonUi();
+  log(`cue_point_changed (revision ${msg.revision}): position ${msg.position_us}us`);
 }
 
 function applyTransportEvent(msg) {
@@ -1153,16 +1188,17 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
+    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
+    updateCueButtonUi(); // refine cue-btn further: may re-disable if playing with no cue point yet
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
     startPeriodicResync();
   });
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
+    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -1204,6 +1240,9 @@ function connect() {
       case "pitch_lock_setting_changed":
         applyPitchLockSettingEvent(msg);
         break;
+      case "cue_point_changed":
+        applyCuePointEvent(msg);
+        break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
         break;
@@ -1244,15 +1283,65 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
   }
 });
 
-document.getElementById("play-btn").addEventListener("click", () => {
-  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "play" }));
-});
-document.getElementById("pause-btn").addEventListener("click", () => {
-  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "pause" }));
+document.getElementById("play-pause-btn").addEventListener("click", () => {
+  const action = transport.playing ? "pause" : "play";
+  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action }));
 });
 document.getElementById("restart-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "restart" }));
 });
+
+/// Pauses the transport at whatever cue_point_us the server currently
+/// holds (see the cue_release transport action - server-authoritative, no
+/// position travels from the client). Shared by two call sites: pressing
+/// Cue while already playing (see pointerdown below - a direct pause, no
+/// hold gesture needed), and releasing a preview hold.
+function sendCueRelease() {
+  ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "cue_release" }));
+}
+
+/// Ends a cue preview hold: releases the transport back to (and pauses at)
+/// the cue point. Shared by both pointerup and pointercancel so a preview
+/// can never get stuck "playing" if the release gesture is interrupted
+/// (pointer dragged off the button, OS-level cancellation, etc.) - same
+/// concern the tempo slider's pointercancel handler guards against.
+function releaseCuePreview() {
+  if (!cuePreviewActive) return;
+  cuePreviewActive = false;
+  sendCueRelease();
+}
+
+{
+  const cueBtnEl = document.getElementById("cue-btn");
+  cueBtnEl.addEventListener("pointerdown", () => {
+    if (transport.playing) {
+      // Playing + a cue point exists (the button is disabled otherwise):
+      // the down event alone pauses and resets the playhead to the cue
+      // point - no hold/release gesture here, unlike the paused-at-cue-point
+      // case below (cuePreviewActive is never set, so a later pointerup/
+      // pointercancel correctly no-ops via releaseCuePreview's own guard).
+      sendCueRelease();
+      return;
+    }
+
+    // Paused. transport.anchor_position_us is the exact current position
+    // (no elapsed-time math while paused), so this comparison is exact -
+    // no floating-point tolerance needed.
+    if (cuePointUs !== null && transport.anchor_position_us === cuePointUs) {
+      // Paused exactly at the existing cue point: hold to preview:
+      // pointerdown plays from here, release resets to the cue point and
+      // pauses again (see releaseCuePreview).
+      cuePreviewActive = true;
+      ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "play" }));
+    } else {
+      // Anywhere else while paused: set/overwrite the cue point at the
+      // current position and stay paused.
+      ws.send(JSON.stringify({ type: "set_cue_point", request_id: `request-${randomId()}`, position_us: transport.anchor_position_us }));
+    }
+  });
+  cueBtnEl.addEventListener("pointerup", releaseCuePreview);
+  cueBtnEl.addEventListener("pointercancel", releaseCuePreview);
+}
 
 /// Called from waveform.js (a separate `type="module"` script, so it can't
 /// see this classic script's `ws`/`randomId` directly) whenever the user
@@ -1263,6 +1352,10 @@ function sendSeekRequest(positionUs) {
   ws.send(JSON.stringify({ type: "seek_request", request_id: `request-${randomId()}`, position_us: positionUs }));
 }
 window.sendSeekRequest = sendSeekRequest;
+// Read by waveform.js's "decode" handler to re-apply the cue marker onto a
+// newly-loaded file - same explicit-bridge convention as sendSeekRequest,
+// in the opposite direction.
+window.getCuePointUs = () => cuePointUs;
 document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });

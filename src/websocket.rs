@@ -179,6 +179,7 @@ async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
         nudge_enabled: room.nudge_enabled,
         bass_cut_enabled: room.bass_cut_enabled,
         pitch_lock_enabled: room.pitch_lock_enabled,
+        cue_point_us: room.cue_point_us,
     }
 }
 
@@ -253,6 +254,9 @@ async fn handle_client_message(
         ClientMessage::SeekRequest { request_id, position_us } => {
             handle_seek_request(request_id, position_us, state, connection_id).await;
         }
+        ClientMessage::SetCuePoint { request_id, position_us } => {
+            handle_set_cue_point(request_id, position_us, state, connection_id).await;
+        }
     }
 }
 
@@ -283,6 +287,9 @@ async fn handle_transport_request(
             }
             crate::protocol::TransportAction::Restart => {
                 room.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
+            }
+            crate::protocol::TransportAction::CueRelease => {
+                room.schedule_cue_release(received_server_time_us, state.schedule_lead_time_us)
             }
             crate::protocol::TransportAction::SetTempo => {
                 drop(room);
@@ -470,6 +477,43 @@ async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<A
         effective_server_time_us: event_data.effective_server_time_us,
         position_us: event_data.position_us,
         playback_rate: event_data.playback_rate,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_cue_point request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_cue_point(position_us)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        position_us,
+        revision = event_data.revision,
+        connected_client_count,
+        "cue point set"
+    );
+
+    let event = ServerMessage::CuePointChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        position_us: event_data.position_us,
     };
 
     let _ = state.events.send(event);
