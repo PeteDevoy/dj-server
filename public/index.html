@@ -445,16 +445,25 @@ const NUDGE_RAMP_S = 0.3; // time to ramp the AudioParam in/out, avoids an audib
 // effectively constant for the life of a page (same browser, same audio
 // pipeline), so rather than let the generic small nudge rediscover and
 // slowly (~50s) crawl toward the same number after every single play/pause,
-// we measure it ONCE per session (driftCalibrationOffsetUs, below - deliberately
-// NOT reset per playback segment) during the first DRIFT_CALIBRATION_DURATION_S
-// of the first segment, apply it as a real one-time fast correction (see
+// we measure it ONCE per session (driftCalibrationOffsetUs, below -
+// deliberately NOT reset per playback segment) over DRIFT_CALIBRATION_DURATION_S,
+// apply it as a real one-time fast correction (see
 // startFastCalibrationCorrection), and from then on bake the known offset
 // directly into the scheduling of every later segment (see
 // scheduleAudioAction) so new segments start already in sync - no further
 // correction needed. The gentle nudge below still runs continuously on the
 // calibrated residual, as a safety net for genuine ongoing drift.
+//
+// That measurement window usually runs against a silent background probe
+// (runDriftCalibrationProbe) as soon as the browser's autoplay policy allows
+// it - well before the user's first real Play click, in the common case - so
+// the fast-correction burst above typically never has to touch real audio at
+// all. If the user presses Play before the probe finishes, a real playback
+// segment's own measurement (in tick(), via the same recordDriftCalibrationSample
+// helper) picks up wherever the probe left off instead of starting over.
 const DRIFT_CALIBRATION_DURATION_S = 1.5;
 const FAST_CALIBRATION_MAX_RATE_DELTA = 0.03; // up to +/-3%: audible but brief, sized to close a KNOWN gap in a few seconds rather than the gentle nudge's ~50s
+const AUDIO_CONTEXT_WARMUP_MS = 300; // see runDriftCalibrationProbe - a just-created context's getOutputTimestamp() isn't meaningful yet
 
 let smoothedDriftUs = null; // EMA of live drift; the nudge controller's input
 let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
@@ -471,6 +480,8 @@ let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the curr
 
 let fastCalibrationCorrectionActive = false; // true while the one-time post-calibration rate burst is running
 let fastCalibrationCorrectionEndCtxTime = null;
+
+let driftCalibrationProbeStarted = false; // guards against starting the background probe more than once per arm-cycle
 
 // Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed
 // (see websocket section) rather than a purely local UI toggle - every
@@ -553,6 +564,87 @@ function startFastCalibrationCorrection() {
   const targetRate = transport.playback_rate * (1 + rateDelta);
   setSourceRate(targetRate, undefined, Math.min(NUDGE_RAMP_S, durationS));
   log(`fast drift-calibration correction engaged: rate -> ${targetRate.toFixed(4)} for ${durationS.toFixed(2)}s (closing known ${Math.round(driftCalibrationOffsetUs)}us gap)`);
+}
+
+/// Feeds one drift sample into the session's shared calibration accumulator.
+/// Called both by a real playback segment's own measurement (tick(), below)
+/// and by the background silent probe (runDriftCalibrationProbe) - both are
+/// measuring the exact same underlying quantity (this AudioContext's fixed
+/// scheduling bias), just via different vehicles, so pooling whichever is
+/// active into one running average is valid, and if they happen to overlap,
+/// is strictly better (more samples, same true value). Returns true once
+/// calibration has just completed on this call.
+function recordDriftCalibrationSample(rawDriftUs) {
+  if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
+  const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
+  if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
+    driftCalibrationSumUs += rawDriftUs;
+    driftCalibrationSampleCount += 1;
+    return false;
+  }
+  driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
+  log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
+  startFastCalibrationCorrection(); // a no-op if nothing is actually playing yet - see setSourceRate's guard
+  return true;
+}
+
+/// Learns this session's fixed calibration offset using a silent, throwaway
+/// buffer instead of waiting for the user's first real Play click - so by
+/// the time they actually press Play, the offset is usually already known
+/// and no audible fast-correction burst ever touches their real content.
+/// Runs entirely locally (performance.now() vs this AudioContext's own
+/// clock) - no server clock needed, since this never has to agree with
+/// other clients, only measure this browser's own pipeline. Connects
+/// straight to destination rather than through pitchNode/bassCutFilter:
+/// neither adds causal sample delay (the pitch-shift bypass path was
+/// verified bit-exact, and a BiquadFilterNode is a zero-lookahead IIR
+/// filter), so they can't affect the measured bias either way, and skipping
+/// them keeps this probe fully independent of the real transport's nodes.
+function runDriftCalibrationProbe() {
+  if (driftCalibrationProbeStarted || !driftCalibrationEnabled || driftCalibrationOffsetUs !== null) return;
+  driftCalibrationProbeStarted = true;
+
+  const ctx = ensureAudioContext();
+  const probeDurationS = DRIFT_CALIBRATION_DURATION_S + 1.0;
+  const silentBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * probeDurationS), ctx.sampleRate); // zero-initialized by spec - genuinely silent
+
+  // A brand-new AudioContext's getOutputTimestamp() correlation isn't
+  // meaningful yet in the instant after creation (the audio thread hasn't
+  // started rendering real output). Every other call site that relies on it
+  // (performanceMsToAudioContextTime, via scheduleAudioAction) only ever
+  // runs well after ensureAudioContext() - seconds later, after a file
+  // loads and/or clock sync completes - so it never hit this. This probe is
+  // the first thing to use a context that might be milliseconds old, so
+  // give it a moment to actually start up first.
+  setTimeout(() => {
+    const leadMs = 150; // mirrors the server's schedule_lead_time_us convention
+    const targetPerfMs = performance.now() + leadMs;
+    const startAt = performanceMsToAudioContextTime(targetPerfMs);
+
+    const source = ctx.createBufferSource();
+    source.buffer = silentBuffer;
+    source.connect(ctx.destination);
+    source.start(startAt, 0);
+    log("background drift-calibration probe started (silent, local-only)");
+
+    const intervalId = setInterval(() => {
+      if (driftCalibrationOffsetUs !== null) {
+        // Finished via some other path (e.g. the user already pressed Play
+        // and a real segment's own measurement got there first) - stop.
+        clearInterval(intervalId);
+        try { source.stop(); } catch (_) { /* already stopped */ }
+        return;
+      }
+      const elapsedSinceStartS = Math.max(0, ctx.currentTime - startAt);
+      const probePositionUs = elapsedSinceStartS * 1e6;
+      const expectedPositionUs = Math.max(0, performance.now() - targetPerfMs) * 1000;
+      const rawDriftUs = probePositionUs - expectedPositionUs;
+      if (recordDriftCalibrationSample(rawDriftUs)) {
+        clearInterval(intervalId);
+        try { source.stop(); } catch (_) { /* already stopped */ }
+      }
+    }, 50);
+  }, AUDIO_CONTEXT_WARMUP_MS);
 }
 
 /// Bang-bang control with hysteresis: engage a small rate correction once
@@ -974,6 +1066,7 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
   try {
     const arrayBuffer = await file.arrayBuffer();
     const ctx = ensureAudioContext();
+    runDriftCalibrationProbe(); // a no-op if already started elsewhere (e.g. first click/keypress, see below)
     await ensurePitchWorkletLoaded(ctx);
     audioBuffer = await ctx.decodeAudioData(arrayBuffer);
     document.getElementById("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
@@ -1021,10 +1114,15 @@ document.getElementById("drift-calibration-checkbox").addEventListener("change",
   if (driftCalibrationEnabled) {
     // Re-arm: forget whatever was learned before and measure fresh, in case
     // conditions changed while this was off (different output device, etc).
+    // Reset driftCalibrationArmedAtCtxTime to null rather than "now" - let
+    // whichever mechanism starts next (the probe below, or a real playback
+    // segment's own measurement) do the arming itself.
     driftCalibrationOffsetUs = null;
     driftCalibrationSumUs = 0;
     driftCalibrationSampleCount = 0;
-    driftCalibrationArmedAtCtxTime = audioCtx ? audioCtx.currentTime : null;
+    driftCalibrationArmedAtCtxTime = null;
+    driftCalibrationProbeStarted = false;
+    if (audioCtx) runDriftCalibrationProbe(); // nothing to lose starting one immediately if we already can
   }
   log(`drift calibration ${driftCalibrationEnabled ? "enabled" : "disabled"} (local only)`);
 });
@@ -1100,21 +1198,12 @@ function tick() {
         document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
         updateNudge(smoothedDriftUs);
       } else if (driftCalibrationOffsetUs === null) {
-        // Still learning this session's fixed bias (only ever happens once -
-        // see driftCalibrationArmedAtCtxTime, set on the first segment or
-        // when this setting is re-enabled). Don't let the gentle nudge react
+        // Still learning this session's fixed bias - possibly pooling
+        // samples with a background probe already in flight (see
+        // recordDriftCalibrationSample). Don't let the gentle nudge react
         // to the still-uncalibrated raw number in the meantime.
-        if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
-        const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
-        if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
-          driftCalibrationSumUs += rawDriftUs;
-          driftCalibrationSampleCount += 1;
-          document.getElementById("m-drift-smoothed").textContent = "calibrating...";
-        } else {
-          driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
-          log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
-          startFastCalibrationCorrection();
-        }
+        document.getElementById("m-drift-smoothed").textContent = "calibrating...";
+        recordDriftCalibrationSample(rawDriftUs);
         updateNudge(null);
       } else if (fastCalibrationCorrectionActive) {
         // A real rate correction is already closing the known gap - let it
@@ -1168,6 +1257,22 @@ setInterval(() => {
   const nudgeText = nudgeDirection === 0 ? "no correction" : nudgeDirection > 0 ? "speeding up" : "slowing down";
   log(`playback drift (smoothed): audio is ${smoothedDriftUs >= 0 ? "ahead of" : "behind"} model by ${Math.abs(Math.round(smoothedDriftUs))}us - ${nudgeText}`);
 }, PLAYBACK_DRIFT_LOG_INTERVAL_MS);
+
+// Kick off the background drift-calibration probe as early as the browser's
+// autoplay policy allows - a real user gesture (this app doesn't use
+// AudioContext before one anyway). Whichever fires first wins;
+// runDriftCalibrationProbe() itself is idempotent, so calling it from here
+// AND from the file-input handler above is safe.
+function armDriftCalibrationProbeOnFirstInteraction() {
+  const trigger = () => {
+    window.removeEventListener("pointerdown", trigger);
+    window.removeEventListener("keydown", trigger);
+    runDriftCalibrationProbe();
+  };
+  window.addEventListener("pointerdown", trigger, { once: true });
+  window.addEventListener("keydown", trigger, { once: true });
+}
+armDriftCalibrationProbeOnFirstInteraction();
 
 connect();
 </script>
