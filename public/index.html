@@ -42,6 +42,12 @@
   </p>
   <p>
     <label>
+      <input type="checkbox" id="drift-calibration-checkbox" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
+      Drift calibration (local only, not synced)
+    </label>
+  </p>
+  <p>
+    <label>
       Tempo (synced room-wide<span id="pitch-lock-note">, pitch-locked</span>): <span id="tempo-readout">0.0%</span>
       <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.001" value="1" disabled />
     </label>
@@ -290,6 +296,14 @@ function performanceMsToAudioContextTime(targetPerformanceMs) {
 /// derived purely from the AudioContext's own sample clock - not from any
 /// server-time estimate. Null while nothing is actually sounding yet (source
 /// stopped, or its scheduled start time hasn't arrived).
+///
+/// Deliberately uses raw audioCtx.currentTime rather than
+/// getOutputTimestamp() - the latter's accuracy (how well its reported
+/// output latency matches the browser's real audible delay) turned out to
+/// vary wildly across engines (accurate on Chrome, apparently stale/wrong on
+/// Firefox), making it a poor cross-browser basis for this measurement. Any
+/// fixed per-browser bias this introduces is instead calibrated out
+/// empirically, once per session - see driftCalibrationOffsetUs below.
 function currentAudioPositionUs() {
   if (!currentSource || !currentSourceStart || !audioCtx) return null;
   const elapsedSinceStartS = Math.max(0, audioCtx.currentTime - currentSourceStart.contextTime);
@@ -425,8 +439,38 @@ const NUDGE_DISENGAGE_THRESHOLD_US = 3_000; // stop once it falls back under thi
 const NUDGE_RATE_DELTA = 0.002; // +/-0.2% playback rate: a DJ-style nudge, not a jump. Closes 35ms in ~17.5s.
 const NUDGE_RAMP_S = 0.3; // time to ramp the AudioParam in/out, avoids an audible click
 
+// Some browsers/audio stacks introduce a fixed, systematic bias into every
+// drift reading (observed on Chrome: a real, audible ~100-110ms discrepancy,
+// confirmed by ear across two clients - not a display artifact). It's
+// effectively constant for the life of a page (same browser, same audio
+// pipeline), so rather than let the generic small nudge rediscover and
+// slowly (~50s) crawl toward the same number after every single play/pause,
+// we measure it ONCE per session (driftCalibrationOffsetUs, below - deliberately
+// NOT reset per playback segment) during the first DRIFT_CALIBRATION_DURATION_S
+// of the first segment, apply it as a real one-time fast correction (see
+// startFastCalibrationCorrection), and from then on bake the known offset
+// directly into the scheduling of every later segment (see
+// scheduleAudioAction) so new segments start already in sync - no further
+// correction needed. The gentle nudge below still runs continuously on the
+// calibrated residual, as a safety net for genuine ongoing drift.
+const DRIFT_CALIBRATION_DURATION_S = 1.5;
+const FAST_CALIBRATION_MAX_RATE_DELTA = 0.03; // up to +/-3%: audible but brief, sized to close a KNOWN gap in a few seconds rather than the gentle nudge's ~50s
+
 let smoothedDriftUs = null; // EMA of live drift; the nudge controller's input
 let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
+
+// Local-only setting (not synced room-wide, unlike nudgeEnabled) - this
+// compensates a per-browser/per-pipeline artifact, not a room-wide
+// preference, so there's nothing to agree on across clients.
+let driftCalibrationEnabled = true;
+
+let driftCalibrationOffsetUs = null; // learned once per session/arm-cycle, reused across every subsequent playback segment
+let driftCalibrationSumUs = 0; // accumulator during the calibration window
+let driftCalibrationSampleCount = 0;
+let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the current measuring window began; null = not currently measuring
+
+let fastCalibrationCorrectionActive = false; // true while the one-time post-calibration rate burst is running
+let fastCalibrationCorrectionEndCtxTime = null;
 
 // Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed
 // (see websocket section) rather than a purely local UI toggle - every
@@ -486,6 +530,29 @@ function disengageNudge(reason) {
   nudgeDirection = 0;
   updateNudgeUi();
   log(`nudge disengaged${reason ? `: ${reason}` : ""}`);
+}
+
+/// Applies a real, one-time rate correction sized to close the just-measured
+/// driftCalibrationOffsetUs in a few seconds, instead of leaving the small
+/// generic nudge (NUDGE_RATE_DELTA) to rediscover and crawl toward the same
+/// number over ~50s. This is a genuine playback-rate change (like the nudge
+/// itself), not a display adjustment - it's the only way to actually correct
+/// real audible timing after a source has already started (see the
+/// conversation that led here: a calibration offset that's merely subtracted
+/// from the nudge's *input* changes what the corrector believes, not what
+/// the listener hears).
+function startFastCalibrationCorrection() {
+  if (driftCalibrationOffsetUs === null || Math.abs(driftCalibrationOffsetUs) < NUDGE_ENGAGE_THRESHOLD_US) {
+    return; // negligible - nothing worth correcting
+  }
+  const offsetS = driftCalibrationOffsetUs / 1e6;
+  const durationS = Math.abs(offsetS) / FAST_CALIBRATION_MAX_RATE_DELTA;
+  const rateDelta = offsetS > 0 ? -FAST_CALIBRATION_MAX_RATE_DELTA : FAST_CALIBRATION_MAX_RATE_DELTA; // ahead -> slow down, same convention as updateNudge
+  fastCalibrationCorrectionActive = true;
+  fastCalibrationCorrectionEndCtxTime = audioCtx.currentTime + durationS;
+  const targetRate = transport.playback_rate * (1 + rateDelta);
+  setSourceRate(targetRate, undefined, Math.min(NUDGE_RAMP_S, durationS));
+  log(`fast drift-calibration correction engaged: rate -> ${targetRate.toFixed(4)} for ${durationS.toFixed(2)}s (closing known ${Math.round(driftCalibrationOffsetUs)}us gap)`);
 }
 
 /// Bang-bang control with hysteresis: engage a small rate correction once
@@ -702,17 +769,28 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
     }
     nudgeDirection = 0;
     smoothedDriftUs = null;
+    fastCalibrationCorrectionActive = false;
+    fastCalibrationCorrectionEndCtxTime = null;
     updateNudgeUi();
+
+    // If a prior segment this session already learned this browser's fixed
+    // calibration offset, bake it directly into this segment's real start
+    // time so it's born already in sync - no fast-correction burst or
+    // "calibrating..." window needed (those only run once, on the very
+    // first segment - see the tick() drift measurement section).
+    const knownCalibrationOffsetS = (driftCalibrationEnabled && driftCalibrationOffsetUs !== null)
+      ? driftCalibrationOffsetUs / 1e6
+      : 0;
 
     if (lateByUs > 0) {
       const latePositionUs = Math.max(0, positionUs + lateByUs);
-      const startedAtContextTime = ctx.currentTime;
+      const startedAtContextTime = ctx.currentTime + knownCalibrationOffsetS;
       log(`late ${action} event by ${Math.round(lateByUs)}us; starting immediately at ${(latePositionUs / 1e6).toFixed(3)}s`);
-      source.start(0, latePositionUs / 1e6);
+      source.start(startedAtContextTime, latePositionUs / 1e6);
       currentSourceStart = { contextTime: startedAtContextTime, positionUs: latePositionUs };
       measureFire();
     } else {
-      const startAt = performanceMsToAudioContextTime(targetLocalMs);
+      const startAt = performanceMsToAudioContextTime(targetLocalMs) + knownCalibrationOffsetS;
       source.start(startAt, positionUs / 1e6);
       currentSourceStart = { contextTime: startAt, positionUs };
       setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
@@ -827,7 +905,7 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
@@ -836,7 +914,7 @@ function connect() {
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -932,6 +1010,24 @@ document.getElementById("nudge-enabled-checkbox").addEventListener("change", (e)
   e.target.checked = nudgeEnabled;
   ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, enabled: desired }));
 });
+document.getElementById("drift-calibration-checkbox").addEventListener("change", (e) => {
+  // Local-only setting: no server round-trip, applies immediately - this is
+  // a per-browser calibration preference, not something the room agrees on.
+  driftCalibrationEnabled = e.target.checked;
+  if (fastCalibrationCorrectionActive) {
+    fastCalibrationCorrectionActive = false;
+    setSourceRate(transport.playback_rate);
+  }
+  if (driftCalibrationEnabled) {
+    // Re-arm: forget whatever was learned before and measure fresh, in case
+    // conditions changed while this was off (different output device, etc).
+    driftCalibrationOffsetUs = null;
+    driftCalibrationSumUs = 0;
+    driftCalibrationSampleCount = 0;
+    driftCalibrationArmedAtCtxTime = audioCtx ? audioCtx.currentTime : null;
+  }
+  log(`drift calibration ${driftCalibrationEnabled ? "enabled" : "disabled"} (local only)`);
+});
 document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
   const desired = e.target.checked;
   e.target.checked = bassCutEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge
@@ -995,13 +1091,61 @@ function tick() {
       const rawDriftUs = audioPositionUs - positionUs;
       document.getElementById("m-drift").textContent = Math.round(rawDriftUs);
 
-      // Exponential moving average with a ~1s time constant - flattens the
-      // frame-to-frame measurement noise (see the nudge section above) while
-      // still tracking genuine drift trends within a few seconds.
-      const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
-      smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
-      document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
-      updateNudge(smoothedDriftUs);
+      if (!driftCalibrationEnabled) {
+        // Calibration off: original behaviour - the nudge reacts directly
+        // to raw (uncalibrated) drift, for A/B comparison against the
+        // calibrated path below.
+        const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
+        smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
+        document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
+        updateNudge(smoothedDriftUs);
+      } else if (driftCalibrationOffsetUs === null) {
+        // Still learning this session's fixed bias (only ever happens once -
+        // see driftCalibrationArmedAtCtxTime, set on the first segment or
+        // when this setting is re-enabled). Don't let the gentle nudge react
+        // to the still-uncalibrated raw number in the meantime.
+        if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
+        const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
+        if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
+          driftCalibrationSumUs += rawDriftUs;
+          driftCalibrationSampleCount += 1;
+          document.getElementById("m-drift-smoothed").textContent = "calibrating...";
+        } else {
+          driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
+          log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
+          startFastCalibrationCorrection();
+        }
+        updateNudge(null);
+      } else if (fastCalibrationCorrectionActive) {
+        // A real rate correction is already closing the known gap - let it
+        // finish rather than having the gentle nudge fight it.
+        if (audioCtx.currentTime >= fastCalibrationCorrectionEndCtxTime) {
+          fastCalibrationCorrectionActive = false;
+          setSourceRate(transport.playback_rate);
+          log("fast drift-calibration correction complete; resuming normal nudge monitoring");
+        } else {
+          document.getElementById("m-drift-smoothed").textContent = "correcting...";
+          document.getElementById("m-nudge").textContent = `fast calibration correction (rate ${currentSourceRate.toFixed(4)})`;
+        }
+      } else {
+        // By this point a REAL correction has already been applied - either
+        // the fast burst just finished (this segment), or the known offset
+        // was baked into scheduling before this segment even started (see
+        // scheduleAudioAction). Either way rawDriftUs should already be
+        // near zero on its own; subtracting driftCalibrationOffsetUs again
+        // here would double-count a correction that's already been made
+        // physically, not just mathematically (this was a real bug: it
+        // produced a phantom drift equal to the offset with the sign
+        // flipped, which the nudge then "corrected" - actively re-breaking
+        // sync it had just fixed).
+        // Exponential moving average with a ~1s time constant - flattens the
+        // frame-to-frame measurement noise (see the nudge section above) while
+        // still tracking genuine drift trends within a few seconds.
+        const alpha = dtS > 0 ? 1 - Math.exp(-dtS / DRIFT_SMOOTHING_TIME_CONSTANT_S) : 1;
+        smoothedDriftUs = smoothedDriftUs === null ? rawDriftUs : smoothedDriftUs + alpha * (rawDriftUs - smoothedDriftUs);
+        document.getElementById("m-drift-smoothed").textContent = Math.round(smoothedDriftUs);
+        updateNudge(smoothedDriftUs);
+      }
     }
   }
   renderTempoFader();
