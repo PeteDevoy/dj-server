@@ -315,6 +315,56 @@ async fn bass_cut_setting_syncs_to_both_clients_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn pitch_lock_setting_syncs_to_both_clients_and_is_idempotent() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["pitch_lock_enabled"], true);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A disables it; both clients must converge on the same event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off", "enabled": false}),
+    )
+    .await;
+
+    let event_a = recv_until(&mut client_a, "pitch_lock_setting_changed").await;
+    let event_b = recv_until(&mut client_b, "pitch_lock_setting_changed").await;
+
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["enabled"], false);
+    assert_eq!(event_a["revision"], 1);
+    assert_eq!(event_a["request_id"], "req-pitch-lock-off");
+
+    // A fresh snapshot must reflect the change.
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-pitch-lock-off"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["pitch_lock_enabled"], false);
+    assert_eq!(snapshot["revision"], 1);
+
+    // Repeating the same value is idempotent: no new event, no revision bump.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_pitch_lock_enabled", "request_id": "req-pitch-lock-off-again", "enabled": false}),
+    )
+    .await;
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-idempotent-pitch-lock-toggle"}),
+    )
+    .await;
+    let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_after["revision"], 1);
+}
+
+#[tokio::test]
 async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

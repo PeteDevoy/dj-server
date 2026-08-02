@@ -15,6 +15,7 @@
   .playing { color: #2a2; }
   .paused { color: #a22; }
   progress { width: 100%; }
+  input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
 </style>
 </head>
 <body>
@@ -41,9 +42,14 @@
   </p>
   <p>
     <label>
-      Tempo (synced room-wide):
-      <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.005" value="1" disabled />
-      <span id="tempo-readout">100.0%</span>
+      Tempo (synced room-wide<span id="pitch-lock-note">, pitch-locked</span>): <span id="tempo-readout">0.0%</span>
+      <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.001" value="1" disabled />
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="pitch-lock-checkbox" checked disabled />
+      Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
     </label>
   </p>
   <p>
@@ -139,6 +145,108 @@ function ensureAudioContext() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
   return audioCtx;
+}
+
+// ---- pitch lock (tempo without changing pitch) ---------------------------
+//
+// AudioBufferSourceNode.playbackRate changes speed AND pitch together (plain
+// resampling) - that's how the tempo control gets its speed change, but it
+// also raises/lowers pitch as an unwanted side effect. This node cancels
+// that out: it's a pitch shifter (see pitch-worklet.js) fed the *inverse*
+// ratio, so the net effect is speed changes via the source's playbackRate
+// while pitch stays locked to the original (0%) recording. It sits between
+// every source and the bass-cut filter, persistent across source swaps
+// exactly like the bass-cut filter - see setSourceRate for how its
+// pitchRatio param is kept in exact sync with the source's rate changes.
+let pitchShiftNode = null;
+let pitchWorkletLoadPromise = null;
+// null = not yet determined; true/false once known. AudioWorklet requires a
+// secure context (HTTPS or localhost) - a LAN IP over plain http:// doesn't
+// qualify even on a trusted network, so this is expected to be false there.
+let pitchWorkletAvailable = null;
+
+// Synced room-wide, like nudge_enabled/bass_cut_enabled - see
+// set_pitch_lock_enabled/pitch_lock_setting_changed in the websocket
+// section. Every connected client should hear the same tempo-vs-pitch
+// behavior, not just whoever happens to be dragging the fader.
+let pitchLockEnabled = true;
+const PITCH_LOCK_TOGGLE_RAMP_S = 0.05; // quick but click-free transition
+
+function markPitchLockUnavailable(reason) {
+  pitchWorkletAvailable = false;
+  const note = document.getElementById("pitch-lock-note");
+  if (note) note.textContent = " (pitch lock unavailable on this device: needs HTTPS or localhost)";
+  // Deliberately NOT disabling the checkbox here: pitch-lock is a room-wide
+  // setting now, so even a client whose own browser can't apply it locally
+  // (no AudioWorklet) can still toggle it for everyone else who can.
+  log(`pitch-lock unavailable on this device, continuing without it locally (tempo will affect pitch here too): ${reason}`);
+}
+
+// A tempo of exactly 0% (transport.playback_rate === 1.0) means there's no
+// pitch shift for pitch-lock to be correcting in the first place - so skip
+// invoking pitch correction entirely in that case, regardless of the
+// pitch-lock checkbox. Checked against transport.playback_rate specifically
+// (the tempo control's own value), not the fully-composed rate passed to
+// setSourceRate: the tempo nudge corrector can pull the actual source rate
+// a hair off 1.0 even while tempo sits at 0%, but that's not worth invoking
+// the pitch shifter over.
+const TEMPO_ZERO_EPSILON = 1e-9;
+
+function isTempoAtZero() {
+  return Math.abs(transport.playback_rate - 1.0) < TEMPO_ZERO_EPSILON;
+}
+
+/// The pitchRatio to send the pitch node for a given fully-composed source
+/// rate (tempo * nudge factor) - 1.0 (no correction) whenever pitch-lock is
+/// off or tempo is at 0%, otherwise the inverse of the composed rate.
+function computePitchTarget(composedRate) {
+  if (isTempoAtZero()) return 1.0;
+  return pitchLockEnabled ? 1 / composedRate : 1.0;
+}
+
+/// Applies a (now-canonical, server-confirmed) pitch-lock setting: updates
+/// the checkbox and ramps the pitch node to (or away from) correction right
+/// now, for the currently-playing source - so the audible difference lands
+/// immediately without needing to restart playback.
+function applyPitchLockEnabled(enabled) {
+  pitchLockEnabled = enabled;
+  document.getElementById("pitch-lock-checkbox").checked = enabled;
+  if (!pitchShiftNode || !audioCtx) return;
+  const target = computePitchTarget(currentSourceRate);
+  const param = pitchShiftNode.parameters.get("pitchRatio");
+  param.cancelScheduledValues(audioCtx.currentTime);
+  param.setValueAtTime(param.value, audioCtx.currentTime);
+  param.linearRampToValueAtTime(target, audioCtx.currentTime + PITCH_LOCK_TOGGLE_RAMP_S);
+}
+
+function ensurePitchWorkletLoaded(ctx) {
+  if (!pitchWorkletLoadPromise) {
+    if (!ctx.audioWorklet) {
+      markPitchLockUnavailable("AudioWorklet API not present (insecure context)");
+      pitchWorkletLoadPromise = Promise.resolve();
+    } else {
+      pitchWorkletLoadPromise = ctx.audioWorklet.addModule("pitch-worklet.js").then(
+        () => { pitchWorkletAvailable = true; },
+        (err) => markPitchLockUnavailable(String(err)),
+      );
+    }
+  }
+  return pitchWorkletLoadPromise;
+}
+
+function ensurePitchShiftNode() {
+  if (pitchWorkletAvailable === false) return null;
+  if (!pitchShiftNode) {
+    const ctx = ensureAudioContext();
+    const channelCount = audioBuffer ? audioBuffer.numberOfChannels : 2;
+    pitchShiftNode = new AudioWorkletNode(ctx, "pitch-shift-processor", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [channelCount],
+    });
+    pitchShiftNode.connect(ensureBassCutFilter());
+  }
+  return pitchShiftNode;
 }
 
 // ---- bass cut (highpass filter) ------------------------------------------
@@ -282,6 +390,17 @@ function currentModelPositionUs(nowServerUs) {
   return transport.anchor_position_us + elapsed * transport.playback_rate;
 }
 
+/// Displays a playback_rate (0.94-1.06, where 1.0 is "no change") as a
+/// signed offset from 0% rather than an absolute percentage - the slider
+/// itself still runs on the raw rate underneath (min/max/value are
+/// unchanged), only the label reads "-6.0%"/"+6.0%" instead of "94.0%"/
+/// "106.0%", since that's what's actually meaningful to a DJ nudging tempo.
+function formatTempoPercent(rate) {
+  const percent = (rate - 1) * 100;
+  const sign = percent > 0 ? "+" : "";
+  return `${sign}${percent.toFixed(1)}%`;
+}
+
 function setStatusUi() {
   const statusEl = document.getElementById("transport-status");
   statusEl.textContent = transport.playing ? "playing" : "paused";
@@ -289,7 +408,7 @@ function setStatusUi() {
   document.getElementById("m-revision").textContent = lastAppliedRevision;
 
   document.getElementById("tempo-slider").value = transport.playback_rate;
-  document.getElementById("tempo-readout").textContent = `${(transport.playback_rate * 100).toFixed(1)}%`;
+  document.getElementById("tempo-readout").textContent = formatTempoPercent(transport.playback_rate);
 }
 
 // ---- playback drift correction (tempo nudge) -----------------------------
@@ -321,6 +440,10 @@ let nudgeEnabled = true;
 /// pass `atContextTime` to hold the current rate until a future scheduled
 /// moment instead (used by synced tempo changes, so all clients change
 /// speed at approximately the same instant).
+///
+/// Also drives the pitch-shift node's correction in exact lockstep (same
+/// ramp timing, inverse value) so pitch stays locked to the 0%-tempo pitch
+/// through every rate change this function ever makes, tempo or nudge alike.
 function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
   if (!currentSource || !currentSourceStart || !audioCtx) return;
   const targetCtxTime = atContextTime ?? audioCtx.currentTime;
@@ -332,12 +455,22 @@ function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
   currentSourceStart = { contextTime: targetCtxTime, positionUs: positionAtTargetUs };
   currentSourceRate = newRate;
 
-  const param = currentSource.playbackRate;
   const rampStartCtxTime = Math.max(audioCtx.currentTime, targetCtxTime);
-  param.cancelScheduledValues(audioCtx.currentTime);
-  param.setValueAtTime(param.value, audioCtx.currentTime); // pin current value, discard any pending automation
-  param.setValueAtTime(param.value, rampStartCtxTime); // hold until the target time (a no-op if that's "now")
-  param.linearRampToValueAtTime(newRate, rampStartCtxTime + rampDurationS);
+
+  const rateParam = currentSource.playbackRate;
+  rateParam.cancelScheduledValues(audioCtx.currentTime);
+  rateParam.setValueAtTime(rateParam.value, audioCtx.currentTime); // pin current value, discard any pending automation
+  rateParam.setValueAtTime(rateParam.value, rampStartCtxTime); // hold until the target time (a no-op if that's "now")
+  rateParam.linearRampToValueAtTime(newRate, rampStartCtxTime + rampDurationS);
+
+  if (pitchShiftNode) {
+    const pitchParam = pitchShiftNode.parameters.get("pitchRatio");
+    const pitchTarget = computePitchTarget(newRate);
+    pitchParam.cancelScheduledValues(audioCtx.currentTime);
+    pitchParam.setValueAtTime(pitchParam.value, audioCtx.currentTime);
+    pitchParam.setValueAtTime(pitchParam.value, rampStartCtxTime);
+    pitchParam.linearRampToValueAtTime(pitchTarget, rampStartCtxTime + rampDurationS);
+  }
 }
 
 function updateNudgeUi() {
@@ -494,7 +627,7 @@ function renderTempoFader() {
   }
 
   document.getElementById("tempo-slider").value = displayValue;
-  document.getElementById("tempo-readout").textContent = `${(displayValue * 100).toFixed(1)}%`;
+  document.getElementById("tempo-readout").textContent = formatTempoPercent(displayValue);
   trimTempoSampleBuffer(renderTimeUs);
 }
 
@@ -539,7 +672,8 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
     }
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(ensureBassCutFilter());
+    const pitchNode = ensurePitchShiftNode(); // null if unavailable (see pitchWorkletAvailable) - fall back to no pitch-lock
+    source.connect(pitchNode || ensureBassCutFilter());
     source.onended = () => {
       // Only clear if this is still the active source - a later play/restart
       // may already have swapped `currentSource` out before this one ends.
@@ -555,6 +689,17 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
     // to whatever was playing before (e.g. right after a restart, drift and
     // any active correction from the pre-restart segment are meaningless).
     currentSourceRate = transport.playback_rate;
+    // The fix this depends on: a brand new AudioParam defaults to 1.0, so
+    // without explicitly writing it here, a source created after a tempo
+    // change had already persisted (e.g. pause at 1.06x, then play again)
+    // would silently play at normal speed - only setSourceRate's *later*
+    // ramps were actually reaching the real AudioParam, never this initial
+    // value. Same reasoning applies to the pitch correction: it needs to
+    // start already-corrected, not ramp in from "no correction".
+    source.playbackRate.value = currentSourceRate;
+    if (pitchNode) {
+      pitchNode.parameters.get("pitchRatio").value = computePitchTarget(currentSourceRate);
+    }
     nudgeDirection = 0;
     smoothedDriftUs = null;
     updateNudgeUi();
@@ -610,12 +755,13 @@ function applySnapshot(msg) {
   lastAppliedRevision = msg.revision;
   applyNudgeEnabled(msg.nudge_enabled);
   applyBassCutEnabled(msg.bass_cut_enabled);
+  applyPitchLockEnabled(msg.pitch_lock_enabled);
   // A reconnect starts a fresh timeline - any buffered tempo samples belong
   // to a session that no longer exists, so drop them rather than let stale
   // pre-reconnect data leak into a post-reconnect interpolated render.
   tempoSampleBuffer = [];
   setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled})`);
+  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled})`);
 }
 
 function applyTransportEvent(msg) {
@@ -661,6 +807,16 @@ function applyBassCutSettingEvent(msg) {
   log(`bass_cut_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
 }
 
+function applyPitchLockSettingEvent(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    log(`ignoring stale/duplicate pitch_lock_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  applyPitchLockEnabled(msg.enabled);
+  log(`pitch_lock_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+}
+
 // ---- websocket -----------------------------------------------------------
 
 const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
@@ -671,7 +827,7 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
@@ -680,7 +836,7 @@ function connect() {
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -719,6 +875,9 @@ function connect() {
       case "bass_cut_setting_changed":
         applyBassCutSettingEvent(msg);
         break;
+      case "pitch_lock_setting_changed":
+        applyPitchLockSettingEvent(msg);
+        break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
         break;
@@ -734,11 +893,21 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   document.getElementById("file-status").textContent = "decoding...";
-  const arrayBuffer = await file.arrayBuffer();
-  const ctx = ensureAudioContext();
-  audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-  document.getElementById("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
-  log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const ctx = ensureAudioContext();
+    await ensurePitchWorkletLoaded(ctx);
+    audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    document.getElementById("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
+    log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
+  } catch (err) {
+    // Without this, any failure here (unsupported/corrupt file, decode
+    // error, ...) was an unhandled promise rejection that left the UI
+    // stuck on "decoding..." forever instead of telling you what happened.
+    audioBuffer = null;
+    document.getElementById("file-status").textContent = `failed to load "${file.name}": ${err.message ?? err}`;
+    log(`failed to decode audio file "${file.name}": ${err.message ?? err}`);
+  }
 });
 
 document.getElementById("play-btn").addEventListener("click", () => {
@@ -768,6 +937,11 @@ document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
   e.target.checked = bassCutEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge
   ws.send(JSON.stringify({ type: "set_bass_cut_enabled", request_id: `request-${randomId()}`, enabled: desired }));
 });
+document.getElementById("pitch-lock-checkbox").addEventListener("change", (e) => {
+  const desired = e.target.checked;
+  e.target.checked = pitchLockEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge/bass-cut
+  ws.send(JSON.stringify({ type: "set_pitch_lock_enabled", request_id: `request-${randomId()}`, enabled: desired }));
+});
 {
   const tempoSliderEl = document.getElementById("tempo-slider");
 
@@ -781,7 +955,7 @@ document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
 
   tempoSliderEl.addEventListener("input", (e) => {
     const rate = parseFloat(e.target.value);
-    document.getElementById("tempo-readout").textContent = `${(rate * 100).toFixed(1)}%`;
+    document.getElementById("tempo-readout").textContent = formatTempoPercent(rate);
     sendTempoSample(rate, false); // throttled - fine to call on every event
   });
 

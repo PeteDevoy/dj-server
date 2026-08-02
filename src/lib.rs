@@ -2,6 +2,7 @@ pub mod clock;
 pub mod config;
 pub mod protocol;
 pub mod room;
+pub mod tls;
 pub mod websocket;
 
 use std::sync::Arc;

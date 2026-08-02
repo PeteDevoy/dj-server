@@ -76,6 +76,9 @@ pub struct RoomState {
     /// Whether clients should apply the bass-cut (highpass) effect. Same
     /// shared-revision convention as nudge_enabled.
     pub bass_cut_enabled: bool,
+    /// Whether clients should pitch-correct tempo changes. Same
+    /// shared-revision convention as nudge_enabled.
+    pub pitch_lock_enabled: bool,
     pub revision: u64,
 }
 
@@ -85,6 +88,7 @@ impl RoomState {
             transport: TransportState::initial(),
             nudge_enabled: true,
             bass_cut_enabled: false,
+            pitch_lock_enabled: true,
             revision: 0,
         }
     }
@@ -124,6 +128,25 @@ impl RoomState {
             };
         }
         self.bass_cut_enabled = enabled;
+        self.revision += 1;
+        BoolSettingEventData {
+            enabled,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
+
+    /// Toggles the room-wide pitch-lock setting. Same idempotent convention
+    /// as `set_nudge_enabled`.
+    pub fn set_pitch_lock_enabled(&mut self, enabled: bool) -> BoolSettingEventData {
+        if self.pitch_lock_enabled == enabled {
+            return BoolSettingEventData {
+                enabled,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        }
+        self.pitch_lock_enabled = enabled;
         self.revision += 1;
         BoolSettingEventData {
             enabled,
@@ -493,6 +516,50 @@ mod tests {
         assert_eq!(room.revision, 2);
 
         room.set_nudge_enabled(false);
+        assert_eq!(room.revision, 3);
+    }
+
+    #[test]
+    fn pitch_lock_enabled_defaults_to_true() {
+        let room = RoomState::new();
+        assert!(room.pitch_lock_enabled);
+    }
+
+    #[test]
+    fn set_pitch_lock_enabled_toggles_and_bumps_revision() {
+        let mut room = RoomState::new();
+
+        let event = room.set_pitch_lock_enabled(false);
+
+        assert!(!event.enabled);
+        assert!(!event.idempotent_replay);
+        assert_eq!(event.revision, 1);
+        assert!(!room.pitch_lock_enabled);
+        assert_eq!(room.revision, 1);
+    }
+
+    #[test]
+    fn set_pitch_lock_enabled_is_idempotent_when_unchanged() {
+        let mut room = RoomState::new();
+        room.set_pitch_lock_enabled(false);
+        let revision_after_first_toggle = room.revision;
+
+        let replay = room.set_pitch_lock_enabled(false);
+
+        assert!(replay.idempotent_replay);
+        assert_eq!(room.revision, revision_after_first_toggle);
+    }
+
+    #[test]
+    fn pitch_lock_setting_shares_revision_counter_with_transport_and_other_settings() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        assert_eq!(room.revision, 1);
+
+        room.set_pitch_lock_enabled(false);
+        assert_eq!(room.revision, 2);
+
+        room.set_bass_cut_enabled(true);
         assert_eq!(room.revision, 3);
     }
 

@@ -3,6 +3,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use shared_audio_clock::config::Config;
+use shared_audio_clock::tls::ensure_tls_config;
 use shared_audio_clock::{router, AppState};
 
 #[tokio::main]
@@ -18,13 +19,32 @@ async fn main() {
         .fallback_service(ServeDir::new("public"))
         .layer(TraceLayer::new_for_http());
 
-    tracing::info!(bind_address = %config.bind_address, "starting shared audio clock server");
+    let addr: std::net::SocketAddr = config
+        .bind_address
+        .parse()
+        .expect("BIND_ADDRESS must be a valid host:port");
 
-    let listener = tokio::net::TcpListener::bind(&config.bind_address)
-        .await
-        .expect("failed to bind address");
+    if config.tls_enabled {
+        let (tls_config, sans) = ensure_tls_config(&config.tls_cert_dir)
+            .await
+            .expect("failed to prepare TLS certificate");
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+        tracing::info!(bind_address = %config.bind_address, "starting shared audio clock server over HTTPS");
+        for san in sans.iter().filter(|san| san.as_str() != "::1") {
+            tracing::info!("open https://{san}:{}/ - accept the self-signed certificate warning once per browser/device", addr.port());
+        }
+
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service())
+            .await
+            .expect("server error");
+    } else {
+        tracing::info!(bind_address = %config.bind_address, "starting shared audio clock server");
+
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("failed to bind address");
+
+        axum::serve(listener, app).await.expect("server error");
+    }
 }

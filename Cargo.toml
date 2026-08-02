@@ -13,6 +13,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 futures = "0.3"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+rcgen = "=0.14.7"
 
 [dev-dependencies]
 tokio-tungstenite = "0.21"

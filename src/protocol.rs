@@ -58,6 +58,12 @@ pub enum ClientMessage {
         request_id: String,
         enabled: bool,
     },
+    /// Toggles whether tempo changes should be pitch-corrected client-side,
+    /// synced the same way as the nudge-enabled and bass-cut settings.
+    SetPitchLockEnabled {
+        request_id: String,
+        enabled: bool,
+    },
 }
 
 impl ClientMessage {
@@ -69,6 +75,7 @@ impl ClientMessage {
             ClientMessage::SetNudgeEnabled { request_id, .. } => request_id,
             ClientMessage::SetTempoRequest { request_id, .. } => request_id,
             ClientMessage::SetBassCutEnabled { request_id, .. } => request_id,
+            ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
         }
     }
 
@@ -107,6 +114,7 @@ pub enum ServerMessage {
         transport: TransportStateDto,
         nudge_enabled: bool,
         bass_cut_enabled: bool,
+        pitch_lock_enabled: bool,
     },
     ClockResponse {
         request_id: String,
@@ -132,6 +140,13 @@ pub enum ServerMessage {
         enabled: bool,
     },
     BassCutSettingChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        enabled: bool,
+    },
+    PitchLockSettingChanged {
         event_id: Uuid,
         request_id: String,
         origin_connection_id: Uuid,
@@ -266,12 +281,14 @@ mod tests {
             },
             nudge_enabled: true,
             bass_cut_enabled: false,
+            pitch_lock_enabled: true,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
         assert_eq!(json["transport"]["playing"], true);
         assert_eq!(json["nudge_enabled"], true);
         assert_eq!(json["bass_cut_enabled"], false);
+        assert_eq!(json["pitch_lock_enabled"], true);
     }
 
     #[test]
@@ -352,6 +369,34 @@ mod tests {
         assert_eq!(json["type"], "bass_cut_setting_changed");
         assert_eq!(json["enabled"], true);
         assert_eq!(json["revision"], 5);
+    }
+
+    #[test]
+    fn deserializes_set_pitch_lock_enabled() {
+        let json = r#"{"type":"set_pitch_lock_enabled","request_id":"request-98","enabled":false}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetPitchLockEnabled { request_id, enabled } => {
+                assert_eq!(request_id, "request-98");
+                assert!(!enabled);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_pitch_lock_setting_changed() {
+        let msg = ServerMessage::PitchLockSettingChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-98".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 6,
+            enabled: false,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "pitch_lock_setting_changed");
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["revision"], 6);
     }
 
     #[test]
