@@ -177,6 +177,7 @@ async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
         revision: room.revision,
         transport: room.transport.to_dto(),
         nudge_enabled: room.nudge_enabled,
+        bass_cut_enabled: room.bass_cut_enabled,
     }
 }
 
@@ -241,6 +242,9 @@ async fn handle_client_message(
         }
         ClientMessage::SetTempoRequest { request_id, playback_rate } => {
             handle_set_tempo_request(request_id, playback_rate, state, connection_id).await;
+        }
+        ClientMessage::SetBassCutEnabled { request_id, enabled } => {
+            handle_set_bass_cut_enabled(request_id, enabled, state, connection_id).await;
         }
     }
 }
@@ -405,6 +409,48 @@ async fn handle_set_tempo_request(
         effective_server_time_us: event_data.effective_server_time_us,
         position_us: event_data.position_us,
         playback_rate: event_data.playback_rate,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_bass_cut_enabled(
+    request_id: String,
+    enabled: bool,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_bass_cut_enabled request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_bass_cut_enabled(enabled)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        enabled,
+        revision = event_data.revision,
+        connected_client_count,
+        "bass-cut setting change accepted"
+    );
+
+    let event = ServerMessage::BassCutSettingChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        enabled: event_data.enabled,
     };
 
     let _ = state.events.send(event);

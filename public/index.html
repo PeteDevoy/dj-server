@@ -47,6 +47,12 @@
     </label>
   </p>
   <p>
+    <label>
+      <input type="checkbox" id="bass-cut-checkbox" disabled />
+      Cut bass (synced room-wide)
+    </label>
+  </p>
+  <p>
     Status: <span id="transport-status" class="paused">unknown</span> —
     position: <span id="position-readout">0.000s</span>
   </p>
@@ -133,6 +139,33 @@ function ensureAudioContext() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
   return audioCtx;
+}
+
+// ---- bass cut (highpass filter) ------------------------------------------
+//
+// A synced room-wide effect, unlike the tempo nudge - a real DJ mixer's
+// "kill bass" switch. Implemented as one persistent BiquadFilterNode sitting
+// between every source and the destination, so its state (cutoff frequency)
+// survives across the play/pause/restart source swaps that already happen
+// elsewhere - only the filter's frequency needs to change, never the graph
+// wiring itself once the filter exists.
+const BASS_CUT_OFF_HZ = 20; // effectively no cut - below any audible bass fundamental
+const BASS_CUT_ON_HZ = 250; // cuts content below this, per intended use as a bass-kill
+const BASS_CUT_RAMP_S = 0.05; // quick but click-free transition
+
+let bassCutEnabled = false; // room-wide synced setting - see applyBassCutEnabled
+let bassCutFilter = null;
+
+function ensureBassCutFilter() {
+  if (!bassCutFilter) {
+    const ctx = ensureAudioContext();
+    bassCutFilter = ctx.createBiquadFilter();
+    bassCutFilter.type = "highpass";
+    bassCutFilter.Q.value = 0.707; // flat (Butterworth) response, no resonant peak at the cutoff
+    bassCutFilter.frequency.value = bassCutEnabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
+    bassCutFilter.connect(ctx.destination);
+  }
+  return bassCutFilter;
 }
 
 /// Maps a `performance.now()`-domain millisecond timestamp onto this
@@ -506,7 +539,7 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
     }
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(ctx.destination);
+    source.connect(ensureBassCutFilter());
     source.onended = () => {
       // Only clear if this is still the active source - a later play/restart
       // may already have swapped `currentSource` out before this one ends.
@@ -560,16 +593,29 @@ function applyNudgeEnabled(enabled) {
   updateNudgeUi();
 }
 
+function applyBassCutEnabled(enabled) {
+  bassCutEnabled = enabled;
+  document.getElementById("bass-cut-checkbox").checked = enabled;
+  if (bassCutFilter && audioCtx) {
+    const target = enabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
+    const param = bassCutFilter.frequency;
+    param.cancelScheduledValues(audioCtx.currentTime);
+    param.setValueAtTime(param.value, audioCtx.currentTime);
+    param.linearRampToValueAtTime(target, audioCtx.currentTime + BASS_CUT_RAMP_S);
+  }
+}
+
 function applySnapshot(msg) {
   transport = msg.transport;
   lastAppliedRevision = msg.revision;
   applyNudgeEnabled(msg.nudge_enabled);
+  applyBassCutEnabled(msg.bass_cut_enabled);
   // A reconnect starts a fresh timeline - any buffered tempo samples belong
   // to a session that no longer exists, so drop them rather than let stale
   // pre-reconnect data leak into a post-reconnect interpolated render.
   tempoSampleBuffer = [];
   setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled})`);
+  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled})`);
 }
 
 function applyTransportEvent(msg) {
@@ -605,6 +651,16 @@ function applyNudgeSettingEvent(msg) {
   log(`nudge_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
 }
 
+function applyBassCutSettingEvent(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    log(`ignoring stale/duplicate bass_cut_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  applyBassCutEnabled(msg.enabled);
+  log(`bass_cut_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+}
+
 // ---- websocket -----------------------------------------------------------
 
 const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
@@ -615,7 +671,7 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
@@ -624,7 +680,7 @@ function connect() {
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider"]) {
+    for (const btn of ["play-btn", "pause-btn", "restart-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -659,6 +715,9 @@ function connect() {
         break;
       case "nudge_setting_changed":
         applyNudgeSettingEvent(msg);
+        break;
+      case "bass_cut_setting_changed":
+        applyBassCutSettingEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
@@ -703,6 +762,11 @@ document.getElementById("nudge-enabled-checkbox").addEventListener("change", (e)
   // apply it - same "server is authoritative" pattern as play/pause/restart.
   e.target.checked = nudgeEnabled;
   ws.send(JSON.stringify({ type: "set_nudge_enabled", request_id: `request-${randomId()}`, enabled: desired }));
+});
+document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
+  const desired = e.target.checked;
+  e.target.checked = bassCutEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge
+  ws.send(JSON.stringify({ type: "set_bass_cut_enabled", request_id: `request-${randomId()}`, enabled: desired }));
 });
 {
   const tempoSliderEl = document.getElementById("tempo-slider");

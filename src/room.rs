@@ -56,10 +56,11 @@ pub struct TransportEventData {
     pub idempotent_replay: bool,
 }
 
-/// The outcome of toggling the room-wide tempo-nudge setting, ready to be
-/// turned into a canonical `ServerMessage::NudgeSettingChanged`.
+/// The outcome of toggling a room-wide boolean setting (tempo-nudge,
+/// bass-cut, ...), ready to be turned into that setting's canonical
+/// `ServerMessage::*SettingChanged` variant.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NudgeSettingEventData {
+pub struct BoolSettingEventData {
     pub enabled: bool,
     pub revision: u64,
     pub idempotent_replay: bool,
@@ -72,6 +73,9 @@ pub struct RoomState {
     /// Not part of the transport timeline, but shares its revision counter
     /// so clients can apply both kinds of event in a single ordered stream.
     pub nudge_enabled: bool,
+    /// Whether clients should apply the bass-cut (highpass) effect. Same
+    /// shared-revision convention as nudge_enabled.
+    pub bass_cut_enabled: bool,
     pub revision: u64,
 }
 
@@ -80,6 +84,7 @@ impl RoomState {
         Self {
             transport: TransportState::initial(),
             nudge_enabled: true,
+            bass_cut_enabled: false,
             revision: 0,
         }
     }
@@ -91,9 +96,9 @@ impl RoomState {
     /// Toggles the room-wide tempo-nudge setting. Idempotent: setting it to
     /// its current value doesn't bump the revision or count as a fresh
     /// change, mirroring `schedule_play`'s idempotent-replay convention.
-    pub fn set_nudge_enabled(&mut self, enabled: bool) -> NudgeSettingEventData {
+    pub fn set_nudge_enabled(&mut self, enabled: bool) -> BoolSettingEventData {
         if self.nudge_enabled == enabled {
-            return NudgeSettingEventData {
+            return BoolSettingEventData {
                 enabled,
                 revision: self.revision,
                 idempotent_replay: true,
@@ -101,7 +106,26 @@ impl RoomState {
         }
         self.nudge_enabled = enabled;
         self.revision += 1;
-        NudgeSettingEventData {
+        BoolSettingEventData {
+            enabled,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
+
+    /// Toggles the room-wide bass-cut setting. Same idempotent convention
+    /// as `set_nudge_enabled`.
+    pub fn set_bass_cut_enabled(&mut self, enabled: bool) -> BoolSettingEventData {
+        if self.bass_cut_enabled == enabled {
+            return BoolSettingEventData {
+                enabled,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        }
+        self.bass_cut_enabled = enabled;
+        self.revision += 1;
+        BoolSettingEventData {
             enabled,
             revision: self.revision,
             idempotent_replay: false,
@@ -425,6 +449,50 @@ mod tests {
         assert_eq!(room.revision, 2);
 
         room.schedule_pause(1_000_000, 150_000);
+        assert_eq!(room.revision, 3);
+    }
+
+    #[test]
+    fn bass_cut_enabled_defaults_to_false() {
+        let room = RoomState::new();
+        assert!(!room.bass_cut_enabled);
+    }
+
+    #[test]
+    fn set_bass_cut_enabled_toggles_and_bumps_revision() {
+        let mut room = RoomState::new();
+
+        let event = room.set_bass_cut_enabled(true);
+
+        assert!(event.enabled);
+        assert!(!event.idempotent_replay);
+        assert_eq!(event.revision, 1);
+        assert!(room.bass_cut_enabled);
+        assert_eq!(room.revision, 1);
+    }
+
+    #[test]
+    fn set_bass_cut_enabled_is_idempotent_when_unchanged() {
+        let mut room = RoomState::new();
+        room.set_bass_cut_enabled(true);
+        let revision_after_first_toggle = room.revision;
+
+        let replay = room.set_bass_cut_enabled(true);
+
+        assert!(replay.idempotent_replay);
+        assert_eq!(room.revision, revision_after_first_toggle);
+    }
+
+    #[test]
+    fn bass_cut_setting_shares_revision_counter_with_transport_and_nudge() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        assert_eq!(room.revision, 1);
+
+        room.set_bass_cut_enabled(true);
+        assert_eq!(room.revision, 2);
+
+        room.set_nudge_enabled(false);
         assert_eq!(room.revision, 3);
     }
 

@@ -52,6 +52,12 @@ pub enum ClientMessage {
         request_id: String,
         playback_rate: f64,
     },
+    /// Toggles a room-wide bass-cut effect (a highpass filter client-side),
+    /// synced the same way as the nudge-enabled setting.
+    SetBassCutEnabled {
+        request_id: String,
+        enabled: bool,
+    },
 }
 
 impl ClientMessage {
@@ -62,6 +68,7 @@ impl ClientMessage {
             ClientMessage::StateRequest { request_id } => request_id,
             ClientMessage::SetNudgeEnabled { request_id, .. } => request_id,
             ClientMessage::SetTempoRequest { request_id, .. } => request_id,
+            ClientMessage::SetBassCutEnabled { request_id, .. } => request_id,
         }
     }
 
@@ -99,6 +106,7 @@ pub enum ServerMessage {
         revision: u64,
         transport: TransportStateDto,
         nudge_enabled: bool,
+        bass_cut_enabled: bool,
     },
     ClockResponse {
         request_id: String,
@@ -117,6 +125,13 @@ pub enum ServerMessage {
         playback_rate: f64,
     },
     NudgeSettingChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        enabled: bool,
+    },
+    BassCutSettingChanged {
         event_id: Uuid,
         request_id: String,
         origin_connection_id: Uuid,
@@ -250,11 +265,13 @@ mod tests {
                 playback_rate: 1.0,
             },
             nudge_enabled: true,
+            bass_cut_enabled: false,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
         assert_eq!(json["transport"]["playing"], true);
         assert_eq!(json["nudge_enabled"], true);
+        assert_eq!(json["bass_cut_enabled"], false);
     }
 
     #[test]
@@ -307,6 +324,34 @@ mod tests {
         let json = r#"{"type":"set_tempo_request","request_id":"r","playback_rate":0.5}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn deserializes_set_bass_cut_enabled() {
+        let json = r#"{"type":"set_bass_cut_enabled","request_id":"request-97","enabled":true}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetBassCutEnabled { request_id, enabled } => {
+                assert_eq!(request_id, "request-97");
+                assert!(enabled);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_bass_cut_setting_changed() {
+        let msg = ServerMessage::BassCutSettingChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-97".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 5,
+            enabled: true,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "bass_cut_setting_changed");
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["revision"], 5);
     }
 
     #[test]

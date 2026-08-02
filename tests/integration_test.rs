@@ -265,6 +265,56 @@ async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn bass_cut_setting_syncs_to_both_clients_and_is_idempotent() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["bass_cut_enabled"], false);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A enables it; both clients must converge on the same event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on", "enabled": true}),
+    )
+    .await;
+
+    let event_a = recv_until(&mut client_a, "bass_cut_setting_changed").await;
+    let event_b = recv_until(&mut client_b, "bass_cut_setting_changed").await;
+
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["enabled"], true);
+    assert_eq!(event_a["revision"], 1);
+    assert_eq!(event_a["request_id"], "req-bass-on");
+
+    // A fresh snapshot must reflect the change.
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-bass-on"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["bass_cut_enabled"], true);
+    assert_eq!(snapshot["revision"], 1);
+
+    // Repeating the same value is idempotent: no new event, no revision bump.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_bass_cut_enabled", "request_id": "req-bass-on-again", "enabled": true}),
+    )
+    .await;
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-idempotent-bass-toggle"}),
+    )
+    .await;
+    let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_after["revision"], 1);
+}
+
+#[tokio::test]
 async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
