@@ -55,6 +55,15 @@
     </label>
   </p>
   <p>
+    <label title="Which library analyses the loaded file for its tempo. Local only, not synced - remembered in a cookie.">
+      BPM detection engine (local only):
+      <select id="bpm-engine-select">
+        <option value="wabd">web-audio-beat-detector</option>
+        <option value="beatdetect">BeatDetect.js</option>
+      </select>
+    </label>
+  </p>
+  <p>
     <label>
       <input type="checkbox" id="pitch-lock-checkbox" checked disabled />
       Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
@@ -418,14 +427,26 @@ function formatTempoPercent(rate) {
   return `${sign}${percent.toFixed(1)}%`;
 }
 
+// ---- cookies (local-only settings) ----------------------------------------
+
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function setCookie(name, value, days = 365) {
+  const expires = new Date(Date.now() + days * 86_400_000).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
 // ---- BPM detection (background worker) -----------------------------------
 //
-// Detection itself (public/bpm-worker.js) runs against the *nominal* (0%
-// tempo) track and never touches the tempo slider at all - detectedBaseBpm
-// is that one-time, rate-independent result. Whenever the effective tempo
-// changes (locally or via a synced remote event), the *displayed* BPM is
-// just recomputed as detectedBaseBpm * rate - a naive linear scale, not a
-// fresh detection pass, per the request that drove this section.
+// Detection itself runs against the *nominal* (0% tempo) track and never
+// touches the tempo slider at all - detectedBaseBpm is that one-time,
+// rate-independent result. Whenever the effective tempo changes (locally or
+// via a synced remote event), the *displayed* BPM is just recomputed as
+// detectedBaseBpm * rate - a naive linear scale, not a fresh detection pass,
+// per the request that drove this section.
 //
 // detectedBaseBpm is deliberately a plain top-level variable (not tucked
 // inside a closure) so it's trivially reachable from anywhere else in this
@@ -434,6 +455,13 @@ function formatTempoPercent(rate) {
 // folds in the tempo scaling.
 let detectedBaseBpm = null;
 let bpmWorker = null;
+
+// Which library performs the detection - a local-only setting (not synced
+// room-wide, like driftCalibrationEnabled: this is a per-browser preference
+// about which analysis to trust/compare, not something the room needs to
+// agree on), remembered across visits via a cookie rather than re-defaulting
+// every page load.
+let bpmEngine = getCookie("bpm_engine") || "wabd";
 
 /// The tempo-adjusted BPM right now, or null if nothing's been detected yet
 /// (see detectedBaseBpm). This is the single source of truth other code
@@ -457,13 +485,33 @@ const BPM_RANGE = [90, 180];
 const BPM_TIME_SIGNATURE = 4;
 const BPM_FLOAT_PRECISION = 4;
 
+/// Dispatches to whichever engine bpm-engine-select currently has selected.
+/// Both branches converge on the same detectedBaseBpm/updateBpmDisplay - the
+/// engine choice only affects how the number gets computed, never how it's
+/// displayed or used afterwards (see currentBpm()).
+async function startBpmDetection(buffer) {
+  if (bpmEngine === "wabd") {
+    detectedBaseBpm = null;
+    updateBpmDisplay(transport.playback_rate);
+    try {
+      detectedBaseBpm = await window.detectBpmWithWabd(buffer);
+      updateBpmDisplay(transport.playback_rate);
+      log(`BPM detected (web-audio-beat-detector): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
+    } catch (err) {
+      log(`BPM detection failed (web-audio-beat-detector): ${err.message ?? err}`);
+    }
+    return;
+  }
+  await startBeatDetectJsDetection(buffer);
+}
+
 /// Renders `buffer` through the same low-pass/high-pass filter chain
 /// BeatDetect.js's _buildOfflineCtx uses (isolating kick-drum-range
 /// transients), then hands the rendered PCM to the background worker for
 /// the actual peak/interval analysis. Reuses the file this app already
 /// decoded for playback (`audioBuffer`) instead of BeatDetect.js's own
 /// fetch+decode path, since we already have it.
-async function startBpmDetection(buffer) {
+async function startBeatDetectJsDetection(buffer) {
   detectedBaseBpm = null;
   updateBpmDisplay(transport.playback_rate);
 
@@ -487,7 +535,7 @@ async function startBpmDetection(buffer) {
   try {
     rendered = await offlineCtx.startRendering();
   } catch (err) {
-    log(`BPM detection failed: could not render offline context: ${err.message ?? err}`);
+    log(`BPM detection failed (BeatDetect.js): could not render offline context: ${err.message ?? err}`);
     return;
   }
 
@@ -500,12 +548,12 @@ async function startBpmDetection(buffer) {
   if (!bpmWorker) bpmWorker = new Worker("bpm-worker.js");
   bpmWorker.onmessage = (e) => {
     if (e.data.error) {
-      log(`BPM detection failed: ${e.data.error}`);
+      log(`BPM detection failed (BeatDetect.js): ${e.data.error}`);
       return;
     }
     detectedBaseBpm = e.data.bpm;
     updateBpmDisplay(transport.playback_rate);
-    log(`BPM detected: ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
+    log(`BPM detected (BeatDetect.js): ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
   };
   bpmWorker.postMessage(
     {
@@ -1251,6 +1299,19 @@ document.getElementById("drift-calibration-checkbox").addEventListener("change",
   }
   log(`drift calibration ${driftCalibrationEnabled ? "enabled" : "disabled"} (local only)`);
 });
+{
+  const bpmEngineSelectEl = document.getElementById("bpm-engine-select");
+  bpmEngineSelectEl.value = bpmEngine; // restore the cookie-remembered choice (default "wabd" if none saved yet)
+  bpmEngineSelectEl.addEventListener("change", (e) => {
+    // Local-only setting, like driftCalibrationEnabled above: no server
+    // round-trip, and remembered across visits via a cookie rather than a
+    // synced room-wide preference.
+    bpmEngine = e.target.value;
+    setCookie("bpm_engine", bpmEngine);
+    log(`BPM detection engine changed to ${bpmEngine} (local only)`);
+    if (audioBuffer) startBpmDetection(audioBuffer); // re-run on the currently loaded file so the two engines are easy to compare
+  });
+}
 document.getElementById("bass-cut-checkbox").addEventListener("change", (e) => {
   const desired = e.target.checked;
   e.target.checked = bassCutEnabled; // revert optimistic flip; wait for the canonical broadcast, same pattern as nudge
@@ -1408,5 +1469,6 @@ armDriftCalibrationProbeOnFirstInteraction();
 connect();
 </script>
 <script type="module" src="waveform.js"></script>
+<script type="module" src="bpm-wabd-engine.js"></script>
 </body>
 </html>
