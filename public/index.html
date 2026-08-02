@@ -459,7 +459,99 @@ const NUDGE_RAMP_S = 0.3; // time to ramp the AudioParam in/out, avoids an audib
 // scheduling of every later segment so new segments start already in sync.
 const DRIFT_CALIBRATION_DURATION_S = 1.5;
 const FAST_CALIBRATION_MAX_RATE_DELTA = 0.03; // up to +/-3%: audible but brief, sized to close a KNOWN gap in a few seconds rather than the gentle nudge's ~50s
-const AUDIO_CONTEXT_WARMUP_MS = 300; // see createDeck's runDriftCalibrationProbe - a just-created context's getOutputTimestamp() isn't meaningful yet
+const AUDIO_CONTEXT_WARMUP_MS = 300; // see runDriftCalibrationProbe - a just-created context's getOutputTimestamp() isn't meaningful yet
+
+// The fixed bias being measured here is a property of the ONE shared
+// AudioContext/output device, not of an individual deck - so the
+// measurement itself is shared (one probe, one accumulator), even though
+// each deck independently decides whether to USE the result (see each
+// deck's own driftCalibrationEnabled) and independently applies its own
+// one-time fast-correction burst to its own currently-playing source (see
+// each deck's own startFastCalibrationCorrection). Running this twice (once
+// per deck) was tried first and measured wildly inflated numbers in
+// practice - two concurrent silent probes on the same real output device
+// don't measure the same fixed bias twice, they measure real contention.
+let driftCalibrationOffsetUs = null; // learned once per session/arm-cycle, reused across every subsequent playback segment on every deck
+let driftCalibrationSumUs = 0; // accumulator during the calibration window
+let driftCalibrationSampleCount = 0;
+let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the current measuring window began; null = not currently measuring
+let driftCalibrationProbeStarted = false; // guards against starting the background probe more than once per arm-cycle
+
+/// Feeds one drift sample into the shared calibration accumulator. Called
+/// both by any deck's own real playback segment measurement (tick(), via
+/// each deck's recordDriftCalibrationSample reference) and by the shared
+/// background silent probe (runDriftCalibrationProbe) - all of these are
+/// measuring the exact same underlying quantity (the AudioContext's fixed
+/// scheduling bias), just via different vehicles, so pooling whichever is
+/// active into one running average is valid, and if several happen to
+/// overlap, is strictly better (more samples, same true value). Returns
+/// true once calibration has just completed on this call.
+function recordDriftCalibrationSample(rawDriftUs) {
+  if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
+  const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
+  if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
+    driftCalibrationSumUs += rawDriftUs;
+    driftCalibrationSampleCount += 1;
+    return false;
+  }
+  driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
+  log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
+  // Each deck decides for itself whether to react (its own
+  // driftCalibrationEnabled) and does so against its own currently-playing
+  // source, if any - a no-op via setSourceRate's guard otherwise.
+  deckA.onCalibrationOffsetMeasured();
+  deckB.onCalibrationOffsetMeasured();
+  return true;
+}
+
+/// Learns this session's fixed calibration offset using a silent, throwaway
+/// buffer instead of waiting for the user's first real Play click - so by
+/// the time they actually press Play, the offset is usually already known
+/// and no audible fast-correction burst ever touches real content. Runs
+/// entirely locally against the shared AudioContext - connects straight to
+/// destination rather than through any deck's pitchNode/bassCutFilter,
+/// since neither adds causal sample delay.
+function runDriftCalibrationProbe() {
+  if (driftCalibrationProbeStarted || driftCalibrationOffsetUs !== null) return;
+  driftCalibrationProbeStarted = true;
+
+  const ctx = ensureAudioContext();
+  const probeDurationS = DRIFT_CALIBRATION_DURATION_S + 1.0;
+  const silentBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * probeDurationS), ctx.sampleRate); // zero-initialized by spec - genuinely silent
+
+  // A brand-new AudioContext's getOutputTimestamp() correlation isn't
+  // meaningful yet in the instant after creation - give it a moment to
+  // actually start up first.
+  setTimeout(() => {
+    const leadMs = 150; // mirrors the server's schedule_lead_time_us convention
+    const targetPerfMs = performance.now() + leadMs;
+    const startAt = performanceMsToAudioContextTime(targetPerfMs);
+
+    const source = ctx.createBufferSource();
+    source.buffer = silentBuffer;
+    source.connect(ctx.destination);
+    source.start(startAt, 0);
+    log("background drift-calibration probe started (silent, local-only)");
+
+    const intervalId = setInterval(() => {
+      if (driftCalibrationOffsetUs !== null) {
+        // Finished via some other path (e.g. a deck's own real playback
+        // measurement got there first) - stop.
+        clearInterval(intervalId);
+        try { source.stop(); } catch (_) { /* already stopped */ }
+        return;
+      }
+      const elapsedSinceStartS = Math.max(0, ctx.currentTime - startAt);
+      const probePositionUs = elapsedSinceStartS * 1e6;
+      const expectedPositionUs = Math.max(0, performance.now() - targetPerfMs) * 1000;
+      const rawDriftUs = probePositionUs - expectedPositionUs;
+      if (recordDriftCalibrationSample(rawDriftUs)) {
+        clearInterval(intervalId);
+        try { source.stop(); } catch (_) { /* already stopped */ }
+      }
+    }, 50);
+  }, AUDIO_CONTEXT_WARMUP_MS);
+}
 
 // ---- tempo control - shared constants --------------------------------------
 //
@@ -782,19 +874,14 @@ function createDeck(deckId) {
   let nudgeDirection = 0; // -1 = slowing down, 0 = off, +1 = speeding up
 
   // Local-only setting (not synced room-wide, unlike nudgeEnabled) - this
-  // compensates a per-browser/per-pipeline artifact, not a room-wide
-  // preference.
+  // deck's own opt-in to using the shared calibration offset (see the
+  // shared driftCalibrationOffsetUs/runDriftCalibrationProbe above) rather
+  // than a per-deck measurement - the fixed bias being compensated is a
+  // property of the one shared AudioContext, not of this deck individually.
   let driftCalibrationEnabled = true;
 
-  let driftCalibrationOffsetUs = null; // learned once per session/arm-cycle, reused across every subsequent playback segment
-  let driftCalibrationSumUs = 0; // accumulator during the calibration window
-  let driftCalibrationSampleCount = 0;
-  let driftCalibrationArmedAtCtxTime = null; // audioCtx.currentTime when the current measuring window began; null = not currently measuring
-
-  let fastCalibrationCorrectionActive = false; // true while the one-time post-calibration rate burst is running
+  let fastCalibrationCorrectionActive = false; // true while this deck's one-time post-calibration rate burst is running
   let fastCalibrationCorrectionEndCtxTime = null;
-
-  let driftCalibrationProbeStarted = false; // guards against starting the background probe more than once per arm-cycle
 
   // Room-wide setting, synced via set_nudge_enabled/nudge_setting_changed.
   let nudgeEnabled = true;
@@ -851,9 +938,11 @@ function createDeck(deckId) {
   }
 
   /// Applies a real, one-time rate correction sized to close the
-  /// just-measured driftCalibrationOffsetUs in a few seconds, instead of
-  /// leaving the small generic nudge to rediscover and crawl toward the same
-  /// number over ~50s.
+  /// just-measured (shared) driftCalibrationOffsetUs in a few seconds,
+  /// instead of leaving the small generic nudge to rediscover and crawl
+  /// toward the same number over ~50s. Applied to THIS deck's own
+  /// currently-playing source only - see onCalibrationOffsetMeasured below
+  /// for how each deck learns the shared measurement finished.
   function startFastCalibrationCorrection() {
     if (driftCalibrationOffsetUs === null || Math.abs(driftCalibrationOffsetUs) < NUDGE_ENGAGE_THRESHOLD_US) {
       return; // negligible - nothing worth correcting
@@ -868,67 +957,14 @@ function createDeck(deckId) {
     log(`fast drift-calibration correction engaged: rate -> ${targetRate.toFixed(4)} for ${durationS.toFixed(2)}s (closing known ${Math.round(driftCalibrationOffsetUs)}us gap)`);
   }
 
-  /// Feeds one drift sample into this deck's shared calibration accumulator.
-  /// Called both by a real playback segment's own measurement (tick(),
-  /// below) and by the background silent probe (runDriftCalibrationProbe).
-  /// Returns true once calibration has just completed on this call.
-  function recordDriftCalibrationSample(rawDriftUs) {
-    if (driftCalibrationArmedAtCtxTime === null) driftCalibrationArmedAtCtxTime = audioCtx.currentTime;
-    const elapsedSinceArmedS = audioCtx.currentTime - driftCalibrationArmedAtCtxTime;
-    if (elapsedSinceArmedS < DRIFT_CALIBRATION_DURATION_S) {
-      driftCalibrationSumUs += rawDriftUs;
-      driftCalibrationSampleCount += 1;
-      return false;
-    }
-    driftCalibrationOffsetUs = driftCalibrationSampleCount > 0 ? driftCalibrationSumUs / driftCalibrationSampleCount : 0;
-    log(`drift calibration complete: measured fixed offset ${Math.round(driftCalibrationOffsetUs)}us over ${driftCalibrationSampleCount} samples (reused for the rest of this session)`);
-    startFastCalibrationCorrection(); // a no-op if nothing is actually playing yet - see setSourceRate's guard
-    return true;
-  }
-
-  /// Learns this session's fixed calibration offset using a silent,
-  /// throwaway buffer instead of waiting for the user's first real Play
-  /// click. Runs entirely locally against the shared AudioContext - connects
-  /// straight to destination rather than through pitchNode/bassCutFilter,
-  /// since neither adds causal sample delay.
-  function runDriftCalibrationProbe() {
-    if (driftCalibrationProbeStarted || !driftCalibrationEnabled || driftCalibrationOffsetUs !== null) return;
-    driftCalibrationProbeStarted = true;
-
-    const ctx = ensureAudioContext();
-    const probeDurationS = DRIFT_CALIBRATION_DURATION_S + 1.0;
-    const silentBuffer = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * probeDurationS), ctx.sampleRate); // zero-initialized by spec - genuinely silent
-
-    // A brand-new AudioContext's getOutputTimestamp() correlation isn't
-    // meaningful yet in the instant after creation - give it a moment to
-    // actually start up first.
-    setTimeout(() => {
-      const leadMs = 150; // mirrors the server's schedule_lead_time_us convention
-      const targetPerfMs = performance.now() + leadMs;
-      const startAt = performanceMsToAudioContextTime(targetPerfMs);
-
-      const source = ctx.createBufferSource();
-      source.buffer = silentBuffer;
-      source.connect(ctx.destination);
-      source.start(startAt, 0);
-      log("background drift-calibration probe started (silent, local-only)");
-
-      const intervalId = setInterval(() => {
-        if (driftCalibrationOffsetUs !== null) {
-          clearInterval(intervalId);
-          try { source.stop(); } catch (_) { /* already stopped */ }
-          return;
-        }
-        const elapsedSinceStartS = Math.max(0, ctx.currentTime - startAt);
-        const probePositionUs = elapsedSinceStartS * 1e6;
-        const expectedPositionUs = Math.max(0, performance.now() - targetPerfMs) * 1000;
-        const rawDriftUs = probePositionUs - expectedPositionUs;
-        if (recordDriftCalibrationSample(rawDriftUs)) {
-          clearInterval(intervalId);
-          try { source.stop(); } catch (_) { /* already stopped */ }
-        }
-      }, 50);
-    }, AUDIO_CONTEXT_WARMUP_MS);
+  /// Called once, right after the shared drift-calibration measurement (see
+  /// the shared recordDriftCalibrationSample near the top of the script)
+  /// completes - lets this deck decide independently whether to react
+  /// (respecting its own driftCalibrationEnabled) and, if so, apply the
+  /// correction to its own currently-playing source (a no-op if nothing is
+  /// playing yet, via setSourceRate's guard).
+  function onCalibrationOffsetMeasured() {
+    if (driftCalibrationEnabled) startFastCalibrationCorrection();
   }
 
   /// Bang-bang control with hysteresis: engage a small rate correction once
@@ -1497,6 +1533,12 @@ function createDeck(deckId) {
       setSourceRate(transport.playback_rate);
     }
     if (driftCalibrationEnabled) {
+      // Re-arm: forget whatever was learned before and measure fresh, in
+      // case conditions changed while this was off. This resets the SHARED
+      // measurement (there's only one physical pipeline bias to learn,
+      // however many decks are enabled) - re-enabling on either deck
+      // re-arms it for both, which is the correct behavior for a quantity
+      // that isn't actually per-deck.
       driftCalibrationOffsetUs = null;
       driftCalibrationSumUs = 0;
       driftCalibrationSampleCount = 0;
@@ -1570,7 +1612,7 @@ function createDeck(deckId) {
     tick,
     onOpen,
     onClose,
-    runDriftCalibrationProbe,
+    onCalibrationOffsetMeasured,
     sendSeekRequest,
     getCuePointUs: () => cuePointUs,
     getLoopRegion: () => loopRegion,
@@ -1693,16 +1735,16 @@ function globalTick() {
 }
 requestAnimationFrame(globalTick);
 
-// Kick off both decks' background drift-calibration probes as early as the
+// Kick off the shared background drift-calibration probe as early as the
 // browser's autoplay policy allows - a real user gesture (this app doesn't
-// use AudioContext before one anyway). Whichever fires first wins;
-// runDriftCalibrationProbe() itself is idempotent per deck.
+// use AudioContext before one anyway). One probe for the one shared
+// AudioContext, not one per deck (see runDriftCalibrationProbe above) -
+// both decks' onCalibrationOffsetMeasured hooks fire once it completes.
 function armDriftCalibrationProbeOnFirstInteraction() {
   const trigger = () => {
     window.removeEventListener("pointerdown", trigger);
     window.removeEventListener("keydown", trigger);
-    deckA.runDriftCalibrationProbe();
-    deckB.runDriftCalibrationProbe();
+    runDriftCalibrationProbe();
   };
   window.addEventListener("pointerdown", trigger, { once: true });
   window.addEventListener("keydown", trigger, { once: true });
