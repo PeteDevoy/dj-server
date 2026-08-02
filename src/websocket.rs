@@ -250,6 +250,9 @@ async fn handle_client_message(
         ClientMessage::SetPitchLockEnabled { request_id, enabled } => {
             handle_set_pitch_lock_enabled(request_id, enabled, state, connection_id).await;
         }
+        ClientMessage::SeekRequest { request_id, position_us } => {
+            handle_seek_request(request_id, position_us, state, connection_id).await;
+        }
     }
 }
 
@@ -289,6 +292,17 @@ async fn handle_transport_request(
                         code: "invalid_message".to_string(),
                         message: "set_tempo is not valid for transport_request; use set_tempo_request instead"
                             .to_string(),
+                    })
+                    .await;
+                return;
+            }
+            crate::protocol::TransportAction::Seek => {
+                drop(room);
+                let _ = outbound_tx
+                    .send(ServerMessage::Error {
+                        request_id: Some(request_id.clone()),
+                        code: "invalid_message".to_string(),
+                        message: "seek is not valid for transport_request; use seek_request instead".to_string(),
                     })
                     .await;
                 return;
@@ -402,6 +416,49 @@ async fn handle_set_tempo_request(
         position_us = event_data.position_us,
         connected_client_count,
         "tempo change accepted"
+    );
+
+    let event = ServerMessage::TransportEvent {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        action: event_data.action,
+        effective_server_time_us: event_data.effective_server_time_us,
+        position_us: event_data.position_us,
+        playback_rate: event_data.playback_rate,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_seek_request(request_id: String, position_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate seek request ignored");
+            return;
+        }
+    }
+
+    let received_server_time_us = state.clock.now_us();
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.schedule_seek(received_server_time_us, state.schedule_lead_time_us, position_us)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        position_us,
+        received_server_time_us,
+        effective_server_time_us = event_data.effective_server_time_us,
+        revision = event_data.revision,
+        connected_client_count,
+        "seek request accepted"
     );
 
     let event = ServerMessage::TransportEvent {

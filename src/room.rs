@@ -230,6 +230,29 @@ impl RoomState {
         }
     }
 
+    /// Schedules a seek to an arbitrary position `lead_time_us` in the
+    /// future, without changing whether it's playing or paused. Generalizes
+    /// `schedule_restart` (seeking to position 0) to any target position -
+    /// e.g. clicking/dragging a waveform. Like `schedule_restart`, always a
+    /// fresh transition (no idempotent-by-value check): landing on the same
+    /// position twice is still the intended effect, not a no-op.
+    pub fn schedule_seek(&mut self, now_us: ServerTimeUs, lead_time_us: u64, position_us: u64) -> TransportEventData {
+        let effective_time_us = now_us + lead_time_us;
+
+        self.transport.anchor_position_us = position_us;
+        self.transport.anchor_server_time_us = effective_time_us;
+        self.revision += 1;
+
+        TransportEventData {
+            action: TransportAction::Seek,
+            effective_server_time_us: effective_time_us,
+            position_us,
+            playback_rate: self.transport.playback_rate,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
+
     /// Schedules a playback-rate change `lead_time_us` in the future, without
     /// changing whether it's playing or paused. Mirrors `schedule_pause`'s
     /// convention: position is re-anchored at the effective time under the
@@ -429,6 +452,47 @@ mod tests {
         room.schedule_restart(1_000_000, 150_000);
 
         assert_eq!(room.revision, revision_after_play + 1);
+    }
+
+    #[test]
+    fn schedule_seek_jumps_to_target_position_and_keeps_playing() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+
+        let event = room.schedule_seek(1_150_000, 150_000, 4_500_000);
+
+        assert_eq!(event.action, TransportAction::Seek);
+        assert_eq!(event.position_us, 4_500_000);
+        assert_eq!(event.effective_server_time_us, 1_300_000);
+        assert!(room.transport.playing);
+        assert_eq!(room.transport.anchor_position_us, 4_500_000);
+        assert_eq!(room.transport.anchor_server_time_us, 1_300_000);
+    }
+
+    #[test]
+    fn schedule_seek_jumps_to_target_position_and_keeps_paused() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.schedule_pause(1_150_000, 150_000);
+
+        let event = room.schedule_seek(2_000_000, 150_000, 7_000_000);
+
+        assert_eq!(event.position_us, 7_000_000);
+        assert!(!room.transport.playing);
+        assert_eq!(room.transport.anchor_position_us, 7_000_000);
+    }
+
+    #[test]
+    fn schedule_seek_increments_revision_even_to_the_same_position() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.schedule_seek(1_000_000, 150_000, 4_500_000);
+        let revision_after_first_seek = room.revision;
+
+        let event = room.schedule_seek(1_500_000, 150_000, 4_500_000);
+
+        assert_eq!(room.revision, revision_after_first_seek + 1);
+        assert!(!event.idempotent_replay);
     }
 
     #[test]

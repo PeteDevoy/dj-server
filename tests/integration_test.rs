@@ -215,6 +215,49 @@ async fn restart_resets_position_but_keeps_playing_and_broadcasts_to_both_client
 }
 
 #[tokio::test]
+async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "transport_request", "request_id": "req-play", "action": "play"}),
+    )
+    .await;
+    let play_a = recv_until(&mut client_a, "transport_event").await;
+    let _ = recv_until(&mut client_b, "transport_event").await;
+    assert_eq!(play_a["revision"], 1);
+
+    send_json(
+        &mut client_b,
+        json!({"type": "seek_request", "request_id": "req-seek", "position_us": 4_500_000}),
+    )
+    .await;
+
+    let seek_a = recv_until(&mut client_a, "transport_event").await;
+    let seek_b = recv_until(&mut client_b, "transport_event").await;
+
+    assert_eq!(seek_a["event_id"], seek_b["event_id"]);
+    assert_eq!(seek_a["action"], "seek");
+    assert_eq!(seek_a["position_us"], 4_500_000);
+    assert_eq!(seek_a["revision"], 2);
+
+    // Seeking must not have paused playback, same as restart.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-seek"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["transport"]["playing"], true);
+    assert_eq!(snapshot["transport"]["anchor_position_us"], 4_500_000);
+}
+
+#[tokio::test]
 async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

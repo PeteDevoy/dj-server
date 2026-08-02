@@ -16,6 +16,7 @@
   .paused { color: #a22; }
   progress { width: 100%; }
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
+  #waveform { margin-top: 0.5rem; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -49,6 +50,7 @@
   <p>
     <label>
       Tempo (synced room-wide<span id="pitch-lock-note">, pitch-locked</span>): <span id="tempo-readout">0.0%</span>
+      — BPM: <span id="bpm-readout">--</span>
       <input type="range" id="tempo-slider" min="0.94" max="1.06" step="0.001" value="1" disabled />
     </label>
   </p>
@@ -69,6 +71,7 @@
     position: <span id="position-readout">0.000s</span>
   </p>
   <progress id="position-bar" value="0" max="1"></progress>
+  <div id="waveform"></div>
 </section>
 
 <section>
@@ -415,6 +418,109 @@ function formatTempoPercent(rate) {
   return `${sign}${percent.toFixed(1)}%`;
 }
 
+// ---- BPM detection (background worker) -----------------------------------
+//
+// Detection itself (public/bpm-worker.js) runs against the *nominal* (0%
+// tempo) track and never touches the tempo slider at all - detectedBaseBpm
+// is that one-time, rate-independent result. Whenever the effective tempo
+// changes (locally or via a synced remote event), the *displayed* BPM is
+// just recomputed as detectedBaseBpm * rate - a naive linear scale, not a
+// fresh detection pass, per the request that drove this section.
+//
+// detectedBaseBpm is deliberately a plain top-level variable (not tucked
+// inside a closure) so it's trivially reachable from anywhere else in this
+// script, or from a `page.evaluate` in a test - other code that needs "the
+// current BPM" should prefer the currentBpm() helper below, which already
+// folds in the tempo scaling.
+let detectedBaseBpm = null;
+let bpmWorker = null;
+
+/// The tempo-adjusted BPM right now, or null if nothing's been detected yet
+/// (see detectedBaseBpm). This is the single source of truth other code
+/// should call rather than re-deriving the same multiplication elsewhere.
+function currentBpm() {
+  return detectedBaseBpm === null ? null : detectedBaseBpm * transport.playback_rate;
+}
+
+function updateBpmDisplay(rate) {
+  const el = document.getElementById("bpm-readout");
+  el.textContent = detectedBaseBpm === null ? "--" : (detectedBaseBpm * rate).toFixed(1);
+}
+
+/// BeatDetect.js's own analysis constants (public/vendor/beatdetect/BeatDetect.js)
+/// - see bpm-worker.js's header for why the actual number-crunching is a
+/// ported copy running in a Worker rather than the library itself.
+const BPM_ANALYSIS_SAMPLE_RATE = 44100; // BeatDetect.js always analyses at this rate regardless of the source file's own rate - OfflineAudioContext resamples automatically
+const BPM_LOW_PASS_FREQ = 150;
+const BPM_HIGH_PASS_FREQ = 100;
+const BPM_RANGE = [90, 180];
+const BPM_TIME_SIGNATURE = 4;
+const BPM_FLOAT_PRECISION = 4;
+
+/// Renders `buffer` through the same low-pass/high-pass filter chain
+/// BeatDetect.js's _buildOfflineCtx uses (isolating kick-drum-range
+/// transients), then hands the rendered PCM to the background worker for
+/// the actual peak/interval analysis. Reuses the file this app already
+/// decoded for playback (`audioBuffer`) instead of BeatDetect.js's own
+/// fetch+decode path, since we already have it.
+async function startBpmDetection(buffer) {
+  detectedBaseBpm = null;
+  updateBpmDisplay(transport.playback_rate);
+
+  const offlineCtx = new OfflineAudioContext(2, buffer.duration * BPM_ANALYSIS_SAMPLE_RATE, BPM_ANALYSIS_SAMPLE_RATE);
+  const source = offlineCtx.createBufferSource();
+  source.buffer = buffer;
+  const lowpass = offlineCtx.createBiquadFilter();
+  lowpass.type = "lowpass";
+  lowpass.frequency.value = BPM_LOW_PASS_FREQ;
+  lowpass.Q.value = 1;
+  const highpass = offlineCtx.createBiquadFilter();
+  highpass.type = "highpass";
+  highpass.frequency.value = BPM_HIGH_PASS_FREQ;
+  highpass.Q.value = 1;
+  source.connect(lowpass);
+  lowpass.connect(highpass);
+  highpass.connect(offlineCtx.destination);
+  source.start(0);
+
+  let rendered;
+  try {
+    rendered = await offlineCtx.startRendering();
+  } catch (err) {
+    log(`BPM detection failed: could not render offline context: ${err.message ?? err}`);
+    return;
+  }
+
+  // Copy into fresh, independently-owned buffers before transferring - the
+  // Float32Arrays getChannelData() returns are views into memory the
+  // rendered AudioBuffer still owns, not safe to hand over as Transferable.
+  const dataL = rendered.getChannelData(0).slice();
+  const dataR = rendered.getChannelData(1).slice();
+
+  if (!bpmWorker) bpmWorker = new Worker("bpm-worker.js");
+  bpmWorker.onmessage = (e) => {
+    if (e.data.error) {
+      log(`BPM detection failed: ${e.data.error}`);
+      return;
+    }
+    detectedBaseBpm = e.data.bpm;
+    updateBpmDisplay(transport.playback_rate);
+    log(`BPM detected: ${detectedBaseBpm.toFixed(4)} (displayed as ${detectedBaseBpm.toFixed(1)} at 0% tempo)`);
+  };
+  bpmWorker.postMessage(
+    {
+      dataL,
+      dataR,
+      sampleRate: BPM_ANALYSIS_SAMPLE_RATE,
+      bpmRange: BPM_RANGE,
+      timeSignature: BPM_TIME_SIGNATURE,
+      round: false,
+      float: BPM_FLOAT_PRECISION,
+    },
+    [dataL.buffer, dataR.buffer]
+  );
+}
+
 function setStatusUi() {
   const statusEl = document.getElementById("transport-status");
   statusEl.textContent = transport.playing ? "playing" : "paused";
@@ -423,6 +529,7 @@ function setStatusUi() {
 
   document.getElementById("tempo-slider").value = transport.playback_rate;
   document.getElementById("tempo-readout").textContent = formatTempoPercent(transport.playback_rate);
+  updateBpmDisplay(transport.playback_rate);
 }
 
 // ---- playback drift correction (tempo nudge) -----------------------------
@@ -787,6 +894,7 @@ function renderTempoFader() {
 
   document.getElementById("tempo-slider").value = displayValue;
   document.getElementById("tempo-readout").textContent = formatTempoPercent(displayValue);
+  updateBpmDisplay(displayValue);
   trimTempoSampleBuffer(renderTimeUs);
 }
 
@@ -940,11 +1048,11 @@ function applyTransportEvent(msg) {
     return;
   }
   lastAppliedRevision = msg.revision;
-  // "restart" doesn't change whether it's playing or paused, so it keeps
-  // whatever the model already had for that flag. ("set_tempo" also
-  // preserves it, but that action is routed to applyTempoSample instead,
-  // never here - see the websocket message switch.)
-  const preservesPlayingState = msg.action === "restart";
+  // "restart" and "seek" don't change whether it's playing or paused, so
+  // they keep whatever the model already had for that flag. ("set_tempo"
+  // also preserves it, but that action is routed to applyTempoSample
+  // instead, never here - see the websocket message switch.)
+  const preservesPlayingState = msg.action === "restart" || msg.action === "seek";
   const willBePlaying = preservesPlayingState ? transport.playing : msg.action === "play";
   transport = {
     playing: willBePlaying,
@@ -1071,6 +1179,13 @@ document.getElementById("file-input").addEventListener("change", async (e) => {
     audioBuffer = await ctx.decodeAudioData(arrayBuffer);
     document.getElementById("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
     log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
+    // The waveform is a separate visualization/seek-input layer (see
+    // waveform.js) - it decodes and renders the file itself via its own
+    // hidden <audio> element, entirely independent of the AudioBufferSourceNode
+    // graph above that actually plays sound. Uses `file` (the original File),
+    // not `arrayBuffer`, since decodeAudioData may have already detached it.
+    window.waveSurfer?.loadBlob(file);
+    startBpmDetection(audioBuffer); // deliberately not awaited - runs in the background, must not block playback
   } catch (err) {
     // Without this, any failure here (unsupported/corrupt file, decode
     // error, ...) was an unhandled promise rejection that left the UI
@@ -1090,6 +1205,16 @@ document.getElementById("pause-btn").addEventListener("click", () => {
 document.getElementById("restart-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, action: "restart" }));
 });
+
+/// Called from waveform.js (a separate `type="module"` script, so it can't
+/// see this classic script's `ws`/`randomId` directly) whenever the user
+/// clicks/drags the waveform to seek. Exposed on `window` deliberately,
+/// since a classic script's top-level functions are already global but the
+/// cross-file dependency is easy to miss without a pointer here.
+function sendSeekRequest(positionUs) {
+  ws.send(JSON.stringify({ type: "seek_request", request_id: `request-${randomId()}`, position_us: positionUs }));
+}
+window.sendSeekRequest = sendSeekRequest;
 document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });
@@ -1150,6 +1275,7 @@ document.getElementById("pitch-lock-checkbox").addEventListener("change", (e) =>
   tempoSliderEl.addEventListener("input", (e) => {
     const rate = parseFloat(e.target.value);
     document.getElementById("tempo-readout").textContent = formatTempoPercent(rate);
+    updateBpmDisplay(rate);
     sendTempoSample(rate, false); // throttled - fine to call on every event
   });
 
@@ -1177,6 +1303,11 @@ function tick() {
     if (audioBuffer) {
       document.getElementById("position-bar").max = audioBuffer.duration;
       document.getElementById("position-bar").value = positionUs / 1e6;
+      // Drives the waveform's visual playhead from the same shared model
+      // position, same as position-bar above. setTime() never emits
+      // wavesurfer's "interaction" event (only genuine clicks/drags do - see
+      // waveform.js), so this can't loop back into a seek request.
+      window.waveSurfer?.setTime(positionUs / 1e6);
     }
 
     const audioPositionUs = transport.playing ? currentAudioPositionUs() : null;
@@ -1276,5 +1407,6 @@ armDriftCalibrationProbeOnFirstInteraction();
 
 connect();
 </script>
+<script type="module" src="waveform.js"></script>
 </body>
 </html>

@@ -13,6 +13,13 @@ pub enum TransportAction {
     /// Resets the playhead to the beginning of the track without changing
     /// whether it's playing or paused.
     Restart,
+    /// Jumps the playhead to an arbitrary position (e.g. clicking/dragging a
+    /// waveform) without changing whether it's playing or paused. Generalizes
+    /// `Restart` (seeking to position 0) to any target position. The target
+    /// itself travels via `ClientMessage::SeekRequest`, not this action -
+    /// `TransportAction` alone carries no data - so this variant only ever
+    /// appears as the tag on the resulting broadcast `TransportEvent`.
+    Seek,
     /// Changes the canonical playback rate without changing whether it's
     /// playing or paused.
     SetTempo,
@@ -64,6 +71,14 @@ pub enum ClientMessage {
         request_id: String,
         enabled: bool,
     },
+    /// Seeks to an arbitrary position, synced room-wide like play/pause -
+    /// e.g. clicking/dragging a waveform. A dedicated message (like
+    /// `SetTempoRequest`) rather than a `TransportRequest` action, since it
+    /// carries a position `TransportAction` alone has no room for.
+    SeekRequest {
+        request_id: String,
+        position_us: u64,
+    },
 }
 
 impl ClientMessage {
@@ -76,6 +91,7 @@ impl ClientMessage {
             ClientMessage::SetTempoRequest { request_id, .. } => request_id,
             ClientMessage::SetBassCutEnabled { request_id, .. } => request_id,
             ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
+            ClientMessage::SeekRequest { request_id, .. } => request_id,
         }
     }
 
@@ -204,6 +220,37 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn deserializes_seek_request() {
+        let json = r#"{"type":"seek_request","request_id":"request-101","position_us":4500000}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SeekRequest { request_id, position_us } => {
+                assert_eq!(request_id, "request-101");
+                assert_eq!(position_us, 4_500_000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_transport_event_seek() {
+        let msg = ServerMessage::TransportEvent {
+            event_id: Uuid::nil(),
+            request_id: "request-101".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 5,
+            action: TransportAction::Seek,
+            effective_server_time_us: 48_375_000,
+            position_us: 4_500_000,
+            playback_rate: 1.0,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "transport_event");
+        assert_eq!(json["action"], "seek");
+        assert_eq!(json["position_us"], 4_500_000);
     }
 
     #[test]
