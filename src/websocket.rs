@@ -273,6 +273,9 @@ async fn handle_client_message(
         ClientMessage::SetLoopActive { request_id, deck, active } => {
             handle_set_loop_active(request_id, deck, active, state, connection_id).await;
         }
+        ClientMessage::RemoveLoop { request_id, deck } => {
+            handle_remove_loop(request_id, deck, state, connection_id).await;
+        }
     }
 }
 
@@ -682,6 +685,53 @@ async fn handle_set_loop_active(
         start_us: event_data.start_us,
         end_us: event_data.end_us,
         active: event_data.active,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_remove_loop(
+    request_id: String,
+    deck: DeckId,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate remove_loop request ignored");
+            return;
+        }
+    }
+
+    let revision = {
+        let mut room = state.room.lock().await;
+        room.deck_mut(deck).remove_loop()
+    };
+
+    let Some(revision) = revision else {
+        debug!(%request_id, %connection_id, ?deck, "remove_loop ignored: no loop exists yet");
+        return;
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        ?deck,
+        revision,
+        connected_client_count,
+        "loop removed"
+    );
+
+    let event = ServerMessage::LoopRemoved {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        deck,
+        revision,
     };
 
     let _ = state.events.send(event);

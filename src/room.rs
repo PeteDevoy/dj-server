@@ -263,6 +263,16 @@ impl DeckState {
         Some(LoopEventData { start_us, end_us, active, revision: self.revision })
     }
 
+    /// Removes the loop region entirely, unlike `set_loop_active` which only
+    /// deactivates it while leaving it in place (visible, re-activatable).
+    /// Returns `None` if there was no loop to remove, mirroring
+    /// `set_loop_active`'s no-op-if-absent convention.
+    pub fn remove_loop(&mut self) -> Option<u64> {
+        self.loop_region.take()?;
+        self.revision += 1;
+        Some(self.revision)
+    }
+
     /// Schedules a play transition `lead_time_us` in the future. If playback
     /// is already active, treats the request as idempotent and returns the
     /// existing anchor instead of restarting playback.
@@ -798,6 +808,25 @@ mod tests {
     fn set_loop_active_with_no_loop_returns_none() {
         let mut room = DeckState::new();
         assert_eq!(room.set_loop_active(true), None);
+    }
+
+    #[test]
+    fn remove_loop_clears_an_existing_loop() {
+        let mut room = DeckState::new();
+        room.set_loop(1_000_000, 3_000_000);
+        let revision_before = room.revision;
+
+        let revision = room.remove_loop().expect("loop exists");
+
+        assert_eq!(room.loop_region, None);
+        assert_eq!(revision, revision_before + 1);
+        assert_eq!(room.revision, revision_before + 1);
+    }
+
+    #[test]
+    fn remove_loop_with_no_loop_returns_none() {
+        let mut room = DeckState::new();
+        assert_eq!(room.remove_loop(), None);
     }
 
     #[test]

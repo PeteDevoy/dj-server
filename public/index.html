@@ -49,7 +49,7 @@
   <h3>Transport</h3>
   <button id="play-pause-btn-a" disabled>Play / Pause</button>
   <button id="restart-btn-a" disabled>⏮ Skip back</button>
-  <button id="cue-btn-a" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="cue-btn-a" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
   <button id="loop-btn-a" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
   <button id="reloop-btn-a" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
   <p>
@@ -126,7 +126,7 @@
   <h3>Transport</h3>
   <button id="play-pause-btn-b" disabled>Play / Pause</button>
   <button id="restart-btn-b" disabled>⏮ Skip back</button>
-  <button id="cue-btn-b" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="cue-btn-b" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
   <button id="loop-btn-b" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
   <button id="reloop-btn-b" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
   <p>
@@ -1215,6 +1215,19 @@ function createDeck(deckId) {
     log(`loop_changed (revision ${msg.revision}): [${msg.start_us}, ${msg.end_us}) active=${msg.active}`);
   }
 
+  function applyLoopRemovedEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate loop_removed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    loopRegion = null;
+    window.renderRegions?.(deckId, { cuePointUs, loopRegion });
+    updateReloopButtonUi();
+    applyLoopRegionToCurrentSource();
+    log(`loop_removed (revision ${msg.revision})`);
+  }
+
   /// Applies the current loopRegion to currentSource's native loop/loopStart/
   /// loopEnd. These are plain attributes, not AudioParams - changing them on
   /// an already-started, already-playing node takes effect on its very next
@@ -1413,6 +1426,21 @@ function createDeck(deckId) {
         return;
       }
 
+      // Paused, with the playhead currently sitting inside an existing loop
+      // region (whether or not it's presently active): pressing Cue here
+      // removes the loop outright instead of previewing/setting a cue point
+      // underneath it - a DJ pressing Cue while parked in a loop means "get
+      // me out of this loop", not "fight the loop for the cue marker".
+      // Takes priority over the at-cue-point preview-hold check below, since
+      // a loop's start (where set_loop also moves the cue point) would
+      // otherwise satisfy that check too.
+      const withinLoop =
+        loopRegion && transport.anchor_position_us >= loopRegion.start_us && transport.anchor_position_us < loopRegion.end_us;
+      if (withinLoop) {
+        ws.send(JSON.stringify({ type: "remove_loop", request_id: `request-${randomId()}`, deck: deckId }));
+        return;
+      }
+
       if (cuePointUs !== null && transport.anchor_position_us === cuePointUs) {
         cuePreviewActive = true;
         ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action: "play" }));
@@ -1537,6 +1565,7 @@ function createDeck(deckId) {
     applyPitchLockSettingEvent,
     applyCuePointEvent,
     applyLoopChangedEvent,
+    applyLoopRemovedEvent,
     applyTempoSample,
     tick,
     onOpen,
@@ -1630,6 +1659,9 @@ function connect() {
         break;
       case "loop_changed":
         deckFor(msg).applyLoopChangedEvent(msg);
+        break;
+      case "loop_removed":
+        deckFor(msg).applyLoopRemovedEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);

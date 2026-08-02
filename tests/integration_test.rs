@@ -470,6 +470,70 @@ async fn set_loop_active_with_no_loop_is_silently_ignored() {
 }
 
 #[tokio::test]
+async fn remove_loop_clears_it_for_both_clients() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "set_loop", "request_id": "req-loop-set", "deck": "a", "start_us": 1_000_000, "end_us": 3_000_000}),
+    )
+    .await;
+    let _ = recv_until(&mut client_a, "cue_point_changed").await;
+    let _ = recv_until(&mut client_b, "cue_point_changed").await;
+    let _ = recv_until(&mut client_a, "loop_changed").await;
+    let _ = recv_until(&mut client_b, "loop_changed").await;
+
+    // B removes the loop entirely; A observes it without having touched anything.
+    send_json(
+        &mut client_b,
+        json!({"type": "remove_loop", "request_id": "req-loop-remove", "deck": "a"}),
+    )
+    .await;
+    let removed_a = recv_until(&mut client_a, "loop_removed").await;
+    let removed_b = recv_until(&mut client_b, "loop_removed").await;
+    assert_eq!(removed_a["event_id"], removed_b["event_id"]);
+    assert_eq!(removed_a["deck"], "a");
+    assert_eq!(removed_a["revision"], 3);
+
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-loop-remove"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert!(snapshot["deck_a"]["loop_region"].is_null());
+    // The cue point set by the earlier set_loop is untouched by removal.
+    assert_eq!(snapshot["deck_a"]["cue_point_us"], 1_000_000);
+}
+
+#[tokio::test]
+async fn remove_loop_with_no_loop_is_silently_ignored() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "remove_loop", "request_id": "req-remove-no-loop", "deck": "a"}),
+    )
+    .await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-remove-noop"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert!(snapshot["deck_a"]["loop_region"].is_null());
+    assert_eq!(snapshot["deck_a"]["revision"], 0); // untouched
+}
+
+#[tokio::test]
 async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

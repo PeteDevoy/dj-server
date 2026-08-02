@@ -154,6 +154,13 @@ pub enum ClientMessage {
         deck: DeckId,
         active: bool,
     },
+    /// Removes a deck's loop region entirely (not just deactivating it) -
+    /// e.g. pressing Cue while paused with the playhead inside the loop. A
+    /// no-op if that deck has no loop.
+    RemoveLoop {
+        request_id: String,
+        deck: DeckId,
+    },
 }
 
 impl ClientMessage {
@@ -170,6 +177,7 @@ impl ClientMessage {
             ClientMessage::SetCuePoint { request_id, .. } => request_id,
             ClientMessage::SetLoop { request_id, .. } => request_id,
             ClientMessage::SetLoopActive { request_id, .. } => request_id,
+            ClientMessage::RemoveLoop { request_id, .. } => request_id,
         }
     }
 
@@ -279,6 +287,17 @@ pub enum ServerMessage {
         start_us: u64,
         end_us: u64,
         active: bool,
+    },
+    /// Broadcast whenever a deck's loop region is removed entirely (see
+    /// `ClientMessage::RemoveLoop`) - unlike `LoopChanged`, this describes an
+    /// absence, so it carries no start/end/active fields. Shares that deck's
+    /// revision counter, like `LoopChanged`.
+    LoopRemoved {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        deck: DeckId,
+        revision: u64,
     },
     Error {
         request_id: Option<String>,
@@ -456,6 +475,34 @@ mod tests {
         assert_eq!(json["end_us"], 13_500_000);
         assert_eq!(json["active"], true);
         assert_eq!(json["revision"], 4);
+    }
+
+    #[test]
+    fn deserializes_remove_loop() {
+        let json = r#"{"type":"remove_loop","request_id":"request-108","deck":"a"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::RemoveLoop { request_id, deck } => {
+                assert_eq!(request_id, "request-108");
+                assert_eq!(deck, DeckId::A);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_loop_removed() {
+        let msg = ServerMessage::LoopRemoved {
+            event_id: Uuid::nil(),
+            request_id: "request-108".to_string(),
+            origin_connection_id: Uuid::nil(),
+            deck: DeckId::A,
+            revision: 7,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "loop_removed");
+        assert_eq!(json["deck"], "a");
+        assert_eq!(json["revision"], 7);
     }
 
     #[test]
