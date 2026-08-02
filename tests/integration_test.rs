@@ -323,6 +323,89 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
 }
 
 #[tokio::test]
+async fn set_loop_syncs_cue_point_and_loop_to_both_clients() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["loop_region"], Value::Null);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // A inserts a loop; B never touches anything.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_loop", "request_id": "req-loop-set", "start_us": 1_000_000, "end_us": 3_000_000}),
+    )
+    .await;
+
+    // Two broadcasts (cue point, then loop), same request, sequential revisions.
+    let cue_a = recv_until(&mut client_a, "cue_point_changed").await;
+    let cue_b = recv_until(&mut client_b, "cue_point_changed").await;
+    assert_eq!(cue_a["event_id"], cue_b["event_id"]);
+    assert_eq!(cue_a["position_us"], 1_000_000);
+    assert_eq!(cue_a["revision"], 1);
+
+    let loop_a = recv_until(&mut client_a, "loop_changed").await;
+    let loop_b = recv_until(&mut client_b, "loop_changed").await;
+    assert_eq!(loop_a["event_id"], loop_b["event_id"]);
+    assert_eq!(loop_a["start_us"], 1_000_000);
+    assert_eq!(loop_a["end_us"], 3_000_000);
+    assert_eq!(loop_a["active"], true);
+    assert_eq!(loop_a["revision"], 2);
+
+    // B (which never touched anything) sees the same loop via a fresh snapshot.
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-loop-set"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["loop_region"]["start_us"], 1_000_000);
+    assert_eq!(snapshot["loop_region"]["end_us"], 3_000_000);
+    assert_eq!(snapshot["loop_region"]["active"], true);
+    assert_eq!(snapshot["cue_point_us"], 1_000_000);
+
+    // B deactivates the loop; A observes it without having touched anything.
+    send_json(
+        &mut client_b,
+        json!({"type": "set_loop_active", "request_id": "req-loop-deactivate", "active": false}),
+    )
+    .await;
+    let deactivate_a = recv_until(&mut client_a, "loop_changed").await;
+    let deactivate_b = recv_until(&mut client_b, "loop_changed").await;
+    assert_eq!(deactivate_a["event_id"], deactivate_b["event_id"]);
+    assert_eq!(deactivate_a["active"], false);
+    assert_eq!(deactivate_a["start_us"], 1_000_000); // bounds unchanged
+    assert_eq!(deactivate_a["end_us"], 3_000_000);
+    assert_eq!(deactivate_a["revision"], 3);
+}
+
+#[tokio::test]
+async fn set_loop_active_with_no_loop_is_silently_ignored() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "set_loop_active", "request_id": "req-no-loop", "active": true}),
+    )
+    .await;
+
+    // No loop_changed broadcast should follow - confirm by requesting a
+    // snapshot instead and seeing it arrive without a loop_changed in between.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-noop"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["loop_region"], Value::Null);
+    assert_eq!(snapshot["revision"], 0); // untouched
+}
+
+#[tokio::test]
 async fn nudge_setting_syncs_to_both_clients_and_is_idempotent() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

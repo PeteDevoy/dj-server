@@ -74,6 +74,26 @@ pub struct CuePointEventData {
     pub revision: u64,
 }
 
+/// The room's single loop region. `active` means "primed to wrap back to
+/// `start_us` once playback reaches `end_us`" - not "currently playing";
+/// an inactive loop still exists (visible, re-activatable) but is inert.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoopRegion {
+    pub start_us: u64,
+    pub end_us: u64,
+    pub active: bool,
+}
+
+/// The outcome of inserting, overwriting, or toggling the room's single
+/// loop region, ready to be turned into `ServerMessage::LoopChanged`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoopEventData {
+    pub start_us: u64,
+    pub end_us: u64,
+    pub active: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomState {
     pub transport: TransportState,
@@ -92,6 +112,9 @@ pub struct RoomState {
     /// deliberately no way to clear it back to `None` once set - only to
     /// overwrite it with a new position (see `set_cue_point`).
     pub cue_point_us: Option<u64>,
+    /// The room's single loop region, or `None` if none has been inserted
+    /// yet. Same shared-revision convention as the settings above.
+    pub loop_region: Option<LoopRegion>,
     pub revision: u64,
 }
 
@@ -103,12 +126,43 @@ impl RoomState {
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
             cue_point_us: None,
+            loop_region: None,
             revision: 0,
         }
     }
 
     pub fn current_position(&self, now_us: ServerTimeUs) -> u64 {
-        self.transport.position_at(now_us)
+        self.position_at_with_loop(now_us)
+    }
+
+    /// The position at `now_us`, wrapped into the active loop's bounds if
+    /// one exists. Looping is deliberately a property of this formula
+    /// rather than a discrete "seek back" event fired by whichever client
+    /// notices first: every observer (server and every client alike)
+    /// derives the identical wrapped position from the same
+    /// anchor/rate/loop state, with no network round-trip and no race to
+    /// coordinate.
+    ///
+    /// Only wraps when the transport's own anchor sits at or before the
+    /// loop's end - i.e. we reached `end_us` via continuous playback
+    /// through the loop, not because an explicit seek/restart/cue-release
+    /// placed the anchor somewhere past it. Without this guard, seeking to
+    /// a position after a loop would immediately "snap back" into it, which
+    /// is not what seeking there means.
+    fn position_at_with_loop(&self, now_us: ServerTimeUs) -> u64 {
+        let raw = self.transport.position_at(now_us);
+        let Some(loop_region) = &self.loop_region else {
+            return raw;
+        };
+        if !loop_region.active || loop_region.end_us <= loop_region.start_us {
+            return raw;
+        }
+        if self.transport.anchor_position_us >= loop_region.end_us || raw < loop_region.end_us {
+            return raw;
+        }
+        let loop_len = loop_region.end_us - loop_region.start_us;
+        let offset = (raw - loop_region.start_us) % loop_len;
+        loop_region.start_us + offset
     }
 
     /// Toggles the room-wide tempo-nudge setting. Idempotent: setting it to
@@ -184,6 +238,31 @@ impl RoomState {
         }
     }
 
+    /// Inserts/overwrites the room's single loop region, always active, and
+    /// moves the cue point to its start (so the cue marker matches where
+    /// the loop begins). Two fresh revisions - one for the cue point, one
+    /// for the loop - broadcast as two separate events by the caller (see
+    /// websocket.rs): a single event can't carry two revision bumps without
+    /// the second silently failing every client's staleness check, since
+    /// revision is how clients tell "already applied" from "new".
+    pub fn set_loop(&mut self, start_us: u64, end_us: u64) -> (CuePointEventData, LoopEventData) {
+        let cue_event = self.set_cue_point(start_us);
+        self.loop_region = Some(LoopRegion { start_us, end_us, active: true });
+        self.revision += 1;
+        let loop_event = LoopEventData { start_us, end_us, active: true, revision: self.revision };
+        (cue_event, loop_event)
+    }
+
+    /// Toggles the existing loop's active flag without changing its bounds.
+    /// Returns `None` if no loop has been inserted yet - nothing to toggle.
+    pub fn set_loop_active(&mut self, active: bool) -> Option<LoopEventData> {
+        let loop_region = self.loop_region.as_mut()?;
+        loop_region.active = active;
+        let (start_us, end_us) = (loop_region.start_us, loop_region.end_us);
+        self.revision += 1;
+        Some(LoopEventData { start_us, end_us, active, revision: self.revision })
+    }
+
     /// Schedules a play transition `lead_time_us` in the future. If playback
     /// is already active, treats the request as idempotent and returns the
     /// existing anchor instead of restarting playback.
@@ -200,7 +279,7 @@ impl RoomState {
         }
 
         let effective_time_us = now_us + lead_time_us;
-        let position_us = self.transport.position_at(now_us);
+        let position_us = self.position_at_with_loop(now_us);
 
         self.transport.playing = true;
         self.transport.anchor_position_us = position_us;
@@ -221,7 +300,7 @@ impl RoomState {
     /// continues until the effective time, then the anchor freezes there.
     pub fn schedule_pause(&mut self, now_us: ServerTimeUs, lead_time_us: u64) -> TransportEventData {
         let effective_time_us = now_us + lead_time_us;
-        let position_us = self.transport.position_at(effective_time_us);
+        let position_us = self.position_at_with_loop(effective_time_us);
 
         self.transport.playing = false;
         self.transport.anchor_position_us = position_us;
@@ -340,7 +419,7 @@ impl RoomState {
         }
 
         let effective_time_us = now_us + lead_time_us;
-        let position_us = self.transport.position_at(effective_time_us);
+        let position_us = self.position_at_with_loop(effective_time_us);
 
         self.transport.anchor_position_us = position_us;
         self.transport.anchor_server_time_us = effective_time_us;
@@ -618,6 +697,118 @@ mod tests {
         assert!(event.idempotent_replay);
         assert!(room.transport.playing); // untouched
         assert_eq!(room.revision, revision_before);
+    }
+
+    #[test]
+    fn loop_region_defaults_to_none() {
+        let room = RoomState::new();
+        assert_eq!(room.loop_region, None);
+    }
+
+    #[test]
+    fn set_loop_creates_active_loop_and_moves_cue_point() {
+        let mut room = RoomState::new();
+        let revision_before = room.revision;
+
+        let (cue_event, loop_event) = room.set_loop(1_000_000, 3_000_000);
+
+        assert_eq!(cue_event.position_us, 1_000_000);
+        assert_eq!(room.cue_point_us, Some(1_000_000));
+        assert_eq!(loop_event.start_us, 1_000_000);
+        assert_eq!(loop_event.end_us, 3_000_000);
+        assert!(loop_event.active);
+        assert_eq!(room.loop_region, Some(LoopRegion { start_us: 1_000_000, end_us: 3_000_000, active: true }));
+        // Two fresh revisions: one for the cue point, one for the loop.
+        assert_eq!(cue_event.revision, revision_before + 1);
+        assert_eq!(loop_event.revision, revision_before + 2);
+        assert_eq!(room.revision, revision_before + 2);
+    }
+
+    #[test]
+    fn set_loop_overwrites_existing_loop() {
+        let mut room = RoomState::new();
+        room.set_loop(1_000_000, 3_000_000);
+
+        room.set_loop(5_000_000, 9_000_000);
+
+        assert_eq!(room.loop_region, Some(LoopRegion { start_us: 5_000_000, end_us: 9_000_000, active: true }));
+        assert_eq!(room.cue_point_us, Some(5_000_000));
+    }
+
+    #[test]
+    fn set_loop_active_toggles_existing_loop() {
+        let mut room = RoomState::new();
+        room.set_loop(1_000_000, 3_000_000);
+        let revision_before = room.revision;
+
+        let event = room.set_loop_active(false).expect("loop exists");
+
+        assert!(!event.active);
+        assert!(!room.loop_region.unwrap().active);
+        assert_eq!(room.revision, revision_before + 1);
+
+        let event = room.set_loop_active(true).expect("loop exists");
+        assert!(event.active);
+        assert!(room.loop_region.unwrap().active);
+    }
+
+    #[test]
+    fn set_loop_active_with_no_loop_returns_none() {
+        let mut room = RoomState::new();
+        assert_eq!(room.set_loop_active(true), None);
+    }
+
+    #[test]
+    fn current_position_wraps_within_active_loop_during_playback() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000); // anchor_position_us=0, anchor_server_time_us=150_000
+        room.set_loop(1_000_000, 3_000_000); // 2s loop starting at 1s
+
+        // now_us chosen so raw elapsed position (7.5s) is well past the loop's
+        // end (3s) - 6.5s past the loop's start, i.e. 3 full loop lengths
+        // (2s each) plus 0.5s: should wrap to 1.5s, not read back 7.5s.
+        let position = room.current_position(7_650_000);
+
+        assert_eq!(position, 1_500_000);
+    }
+
+    #[test]
+    fn current_position_does_not_wrap_when_loop_inactive() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.set_loop(1_000_000, 3_000_000);
+        room.set_loop_active(false);
+
+        let position = room.current_position(7_650_000);
+
+        assert_eq!(position, 7_500_000); // raw, unwrapped - the loop is inert
+    }
+
+    #[test]
+    fn current_position_does_not_snap_back_when_seeked_past_loop_end() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.set_loop(1_000_000, 3_000_000);
+
+        // Seeking to 5s (past the loop's 3s end) must not immediately
+        // "snap back" into the loop - that's not what seeking there means.
+        room.schedule_seek(1_000_000, 150_000, 5_000_000);
+
+        let position = room.current_position(1_300_000); // shortly after the seek's effective time
+        assert!(position >= 5_000_000); // still past the loop, not wrapped back to ~1-3s
+    }
+
+    #[test]
+    fn schedule_pause_freezes_at_wrapped_position_during_active_loop() {
+        let mut room = RoomState::new();
+        room.schedule_play(0, 150_000);
+        room.set_loop(1_000_000, 3_000_000);
+
+        let event = room.schedule_pause(7_500_000, 150_000);
+
+        assert_eq!(event.position_us, 1_500_000);
+        assert_eq!(room.transport.anchor_position_us, 1_500_000);
+        assert!(!room.transport.playing);
     }
 
     #[test]

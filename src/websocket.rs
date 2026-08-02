@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::clock::Clock;
-use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{ClientMessage, LoopRegionDto, ServerMessage};
 use crate::room::RoomState;
 
 /// Bound on how many recent request IDs are remembered for deduplication.
@@ -180,6 +180,7 @@ async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
         bass_cut_enabled: room.bass_cut_enabled,
         pitch_lock_enabled: room.pitch_lock_enabled,
         cue_point_us: room.cue_point_us,
+        loop_region: room.loop_region.map(|l| LoopRegionDto { start_us: l.start_us, end_us: l.end_us, active: l.active }),
     }
 }
 
@@ -256,6 +257,12 @@ async fn handle_client_message(
         }
         ClientMessage::SetCuePoint { request_id, position_us } => {
             handle_set_cue_point(request_id, position_us, state, connection_id).await;
+        }
+        ClientMessage::SetLoop { request_id, start_us, end_us } => {
+            handle_set_loop(request_id, start_us, end_us, state, connection_id).await;
+        }
+        ClientMessage::SetLoopActive { request_id, active } => {
+            handle_set_loop_active(request_id, active, state, connection_id).await;
         }
     }
 }
@@ -514,6 +521,111 @@ async fn handle_set_cue_point(request_id: String, position_us: u64, state: &Arc<
         origin_connection_id: connection_id,
         revision: event_data.revision,
         position_us: event_data.position_us,
+    };
+
+    let _ = state.events.send(event);
+}
+
+/// Inserts/overwrites the room's loop, broadcasting two separate events
+/// (CuePointChanged, then LoopChanged) since `RoomState::set_loop` bumps
+/// the revision twice - one message can't carry two revision bumps without
+/// the second failing every client's own staleness check.
+async fn handle_set_loop(request_id: String, start_us: u64, end_us: u64, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_loop request ignored");
+            return;
+        }
+    }
+
+    let (cue_event, loop_event) = {
+        let mut room = state.room.lock().await;
+        room.set_loop(start_us, end_us)
+    };
+
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+
+    let cue_event_id = Uuid::new_v4();
+    info!(
+        event_id = %cue_event_id,
+        request_id = %request_id,
+        %connection_id,
+        position_us = cue_event.position_us,
+        revision = cue_event.revision,
+        connected_client_count,
+        "cue point set (via set_loop)"
+    );
+    let _ = state.events.send(ServerMessage::CuePointChanged {
+        event_id: cue_event_id,
+        request_id: request_id.clone(),
+        origin_connection_id: connection_id,
+        revision: cue_event.revision,
+        position_us: cue_event.position_us,
+    });
+
+    let loop_event_id = Uuid::new_v4();
+    info!(
+        event_id = %loop_event_id,
+        request_id = %request_id,
+        %connection_id,
+        start_us = loop_event.start_us,
+        end_us = loop_event.end_us,
+        active = loop_event.active,
+        revision = loop_event.revision,
+        connected_client_count,
+        "loop inserted"
+    );
+    let _ = state.events.send(ServerMessage::LoopChanged {
+        event_id: loop_event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: loop_event.revision,
+        start_us: loop_event.start_us,
+        end_us: loop_event.end_us,
+        active: loop_event.active,
+    });
+}
+
+async fn handle_set_loop_active(request_id: String, active: bool, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_loop_active request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_loop_active(active)
+    };
+
+    let Some(event_data) = event_data else {
+        debug!(%request_id, %connection_id, "set_loop_active ignored: no loop exists yet");
+        return;
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        active,
+        revision = event_data.revision,
+        connected_client_count,
+        "loop active toggled"
+    );
+
+    let event = ServerMessage::LoopChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        start_us: event_data.start_us,
+        end_us: event_data.end_us,
+        active: event_data.active,
     };
 
     let _ = state.events.send(event);

@@ -5,10 +5,11 @@
 // explicit `window.x = ...` bridges in both directions (function
 // declarations in the classic script do attach to `window` automatically,
 // but its top-level `let`s don't - so the classic script exposes what this
-// file needs to read, e.g. `window.sendSeekRequest`/`window.getCuePointUs`,
-// and this file exposes what the classic script needs, e.g.
-// `window.waveSurfer`/`window.updateCueMarker` below - deliberately, rather
-// than relying on implicit global visibility either way).
+// file needs to read, e.g. `window.sendSeekRequest`/`window.getCuePointUs`/
+// `window.getLoopRegion`, and this file exposes what the classic script
+// needs, e.g. `window.waveSurfer`/`window.renderRegions` below -
+// deliberately, rather than relying on implicit global visibility either
+// way).
 import WaveSurfer from "./vendor/wavesurfer/wavesurfer.esm.js";
 import RegionsPlugin from "./vendor/wavesurfer/plugins/regions.esm.js";
 
@@ -36,35 +37,51 @@ const waveSurfer = WaveSurfer.create({
 });
 window.waveSurfer = waveSurfer;
 
-/// Renders the room's single cue point (see the "Cue" button in index.html)
-/// as a red marker, or clears it entirely if `positionUs` is null. Called
-/// from the main script whenever cuePointUs changes (a synced
-/// cue_point_changed broadcast, a fresh state_snapshot, or a new file
-/// finishing decode - regions don't survive loadBlob() re-decoding a new
-/// file on this same instance, so the marker needs re-applying each time).
-/// clearRegions() first since there's only ever one cue point - a stale
-/// marker from a previous position must never linger alongside a new one.
-window.updateCueMarker = function (positionUs) {
+/// Renders BOTH the cue point marker and the loop region together - they
+/// have to be managed as one combined function, not two independent
+/// "clear + add" calls, because regions.clearRegions() wipes every region
+/// on the waveform, not just the caller's own one. Every call site that
+/// changes either piece of state passes the FULL current state (both
+/// values, one of which may be unchanged) so neither ever gets silently
+/// wiped by an update to the other.
+///
+/// `loopRegion` (if given) is `{start_us, end_us, active}`; its color
+/// reflects `active` - amber while primed to loop, grey/15% while inert.
+window.renderRegions = function ({ cuePointUs, loopRegion }) {
   regions.clearRegions();
-  if (positionUs === null) return;
-  regions.addRegion({
-    start: positionUs / 1e6,
-    color: "rgba(255, 0, 0, 0.8)",
-    drag: false,
-    resize: false,
-  });
+  if (loopRegion) {
+    regions.addRegion({
+      start: loopRegion.start_us / 1e6,
+      end: loopRegion.end_us / 1e6,
+      color: loopRegion.active ? "rgba(255, 191, 0, 0.8)" : "rgba(128, 128, 128, 0.15)",
+      drag: false,
+      resize: false,
+    });
+  }
+  if (cuePointUs !== null && cuePointUs !== undefined) {
+    regions.addRegion({
+      start: cuePointUs / 1e6,
+      color: "rgba(255, 0, 0, 0.8)",
+      drag: false,
+      resize: false,
+    });
+  }
 };
 
 // Regions don't survive loadBlob() decoding a new file on this same
 // instance, so whenever a fresh file finishes decoding, re-apply whatever
-// cue point currently exists (read via window.getCuePointUs, the same
-// explicit-bridge convention as window.sendSeekRequest, since the cue
-// point's state lives in the main classic script, not here). Calling this
-// from the main script's file-input handler directly - instead of relying
-// on "decode" - would race: loadBlob() is async, and this event is the only
-// reliable signal that wavesurfer's own decode-side-effects have finished.
+// cue point/loop currently exist (read via window.getCuePointUs/
+// window.getLoopRegion, the same explicit-bridge convention as
+// window.sendSeekRequest, since that state lives in the main classic
+// script, not here). Calling this from the main script's file-input
+// handler directly - instead of relying on "decode" - would race:
+// loadBlob() is async, and this event is the only reliable signal that
+// wavesurfer's own decode-side-effects have finished.
 waveSurfer.on("decode", () => {
-  window.updateCueMarker(window.getCuePointUs?.() ?? null);
+  window.renderRegions({
+    cuePointUs: window.getCuePointUs?.() ?? null,
+    loopRegion: window.getLoopRegion?.() ?? null,
+  });
 });
 
 waveSurfer.on("interaction", (newTimeS) => {

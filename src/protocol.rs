@@ -42,6 +42,13 @@ pub struct TransportStateDto {
     pub playback_rate: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LoopRegionDto {
+    pub start_us: u64,
+    pub end_us: u64,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -96,6 +103,21 @@ pub enum ClientMessage {
         request_id: String,
         position_us: u64,
     },
+    /// Inserts/overwrites the room's single loop region, always active, at
+    /// an arbitrary [start_us, end_us) - e.g. pressing Loop with no active
+    /// loop at the playhead. Synced room-wide like `SetCuePoint`.
+    SetLoop {
+        request_id: String,
+        start_us: u64,
+        end_us: u64,
+    },
+    /// Toggles the existing loop's active flag without changing its bounds
+    /// (e.g. pressing Loop on an already-active loop to deactivate it, or
+    /// Reloop/exit in either direction). A no-op if no loop exists yet.
+    SetLoopActive {
+        request_id: String,
+        active: bool,
+    },
 }
 
 impl ClientMessage {
@@ -110,6 +132,8 @@ impl ClientMessage {
             ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
             ClientMessage::SeekRequest { request_id, .. } => request_id,
             ClientMessage::SetCuePoint { request_id, .. } => request_id,
+            ClientMessage::SetLoop { request_id, .. } => request_id,
+            ClientMessage::SetLoopActive { request_id, .. } => request_id,
         }
     }
 
@@ -127,6 +151,12 @@ impl ClientMessage {
                 return Err(format!(
                     "playback_rate must be between {MIN_PLAYBACK_RATE} and {MAX_PLAYBACK_RATE}"
                 ));
+            }
+        }
+
+        if let ClientMessage::SetLoop { start_us, end_us, .. } = self {
+            if end_us <= start_us {
+                return Err("end_us must be greater than start_us".to_string());
             }
         }
 
@@ -150,6 +180,7 @@ pub enum ServerMessage {
         bass_cut_enabled: bool,
         pitch_lock_enabled: bool,
         cue_point_us: Option<u64>,
+        loop_region: Option<LoopRegionDto>,
     },
     ClockResponse {
         request_id: String,
@@ -197,6 +228,20 @@ pub enum ServerMessage {
         origin_connection_id: Uuid,
         revision: u64,
         position_us: u64,
+    },
+    /// Broadcast whenever the room's single loop region is inserted,
+    /// overwritten, or toggled active/inactive (see `ClientMessage::SetLoop`
+    /// / `SetLoopActive`). Shares the transport's revision counter, like
+    /// `CuePointChanged`. Always describes a concrete loop (never absent) -
+    /// this only ever fires when one exists to describe.
+    LoopChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        start_us: u64,
+        end_us: u64,
+        active: bool,
     },
     Error {
         request_id: Option<String>,
@@ -290,6 +335,64 @@ mod tests {
         assert_eq!(json["type"], "cue_point_changed");
         assert_eq!(json["position_us"], 6_000_000);
         assert_eq!(json["revision"], 3);
+    }
+
+    #[test]
+    fn deserializes_set_loop() {
+        let json = r#"{"type":"set_loop","request_id":"request-106","start_us":6000000,"end_us":13500000}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetLoop { request_id, start_us, end_us } => {
+                assert_eq!(request_id, "request-106");
+                assert_eq!(start_us, 6_000_000);
+                assert_eq!(end_us, 13_500_000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn rejects_set_loop_with_end_before_start() {
+        let msg = ClientMessage::SetLoop { request_id: "req".to_string(), start_us: 10_000_000, end_us: 5_000_000 };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_set_loop_with_end_equal_to_start() {
+        let msg = ClientMessage::SetLoop { request_id: "req".to_string(), start_us: 5_000_000, end_us: 5_000_000 };
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn deserializes_set_loop_active() {
+        let json = r#"{"type":"set_loop_active","request_id":"request-107","active":false}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetLoopActive { request_id, active } => {
+                assert_eq!(request_id, "request-107");
+                assert!(!active);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_loop_changed() {
+        let msg = ServerMessage::LoopChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-106".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 4,
+            start_us: 6_000_000,
+            end_us: 13_500_000,
+            active: true,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "loop_changed");
+        assert_eq!(json["start_us"], 6_000_000);
+        assert_eq!(json["end_us"], 13_500_000);
+        assert_eq!(json["active"], true);
+        assert_eq!(json["revision"], 4);
     }
 
     #[test]
@@ -400,6 +503,7 @@ mod tests {
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
             cue_point_us: Some(6_000_000),
+            loop_region: Some(LoopRegionDto { start_us: 6_000_000, end_us: 10_000_000, active: true }),
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
@@ -408,6 +512,9 @@ mod tests {
         assert_eq!(json["bass_cut_enabled"], false);
         assert_eq!(json["pitch_lock_enabled"], true);
         assert_eq!(json["cue_point_us"], 6_000_000);
+        assert_eq!(json["loop_region"]["start_us"], 6_000_000);
+        assert_eq!(json["loop_region"]["end_us"], 10_000_000);
+        assert_eq!(json["loop_region"]["active"], true);
     }
 
     #[test]

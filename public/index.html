@@ -33,6 +33,8 @@
   <button id="play-pause-btn" disabled>Play / Pause</button>
   <button id="restart-btn" disabled>⏮ Skip back</button>
   <button id="cue-btn" disabled title="Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="loop-btn" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
+  <button id="reloop-btn" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
   <button id="state-btn" disabled>Refresh state</button>
   <button id="resync-btn" disabled>Resync clock</button>
   <p>
@@ -319,7 +321,8 @@ function performanceMsToAudioContextTime(targetPerformanceMs) {
 function currentAudioPositionUs() {
   if (!currentSource || !currentSourceStart || !audioCtx) return null;
   const elapsedSinceStartS = Math.max(0, audioCtx.currentTime - currentSourceStart.contextTime);
-  return currentSourceStart.positionUs + elapsedSinceStartS * 1e6 * currentSourceRate;
+  const raw = currentSourceStart.positionUs + elapsedSinceStartS * 1e6 * currentSourceRate;
+  return wrapPositionWithLoop(raw, currentSourceStart.positionUs);
 }
 
 // ---- server clock estimation --------------------------------------------
@@ -413,7 +416,8 @@ let transport = { playing: false, anchor_position_us: 0, anchor_server_time_us: 
 function currentModelPositionUs(nowServerUs) {
   if (!transport.playing) return transport.anchor_position_us;
   const elapsed = Math.max(0, nowServerUs - transport.anchor_server_time_us);
-  return transport.anchor_position_us + elapsed * transport.playback_rate;
+  const raw = transport.anchor_position_us + elapsed * transport.playback_rate;
+  return wrapPositionWithLoop(raw, transport.anchor_position_us);
 }
 
 // ---- cue point -------------------------------------------------------------
@@ -434,6 +438,56 @@ function updateCueButtonUi() {
   const btn = document.getElementById("cue-btn");
   const connected = ws && ws.readyState === WebSocket.OPEN;
   btn.disabled = !connected || (transport.playing && cuePointUs === null);
+}
+
+// ---- loop region ------------------------------------------------------------
+//
+// Room-wide synced, like the cue point above. "active" means "primed to
+// wrap back to start once playback reaches end" - not "currently playing".
+// Looping itself is a property of the position formulas below
+// (wrapPositionWithLoop), not a discrete "seek back" event any one client
+// fires: every client (and the server - see RoomState::position_at_with_loop)
+// derives the identical wrapped position from the same anchor/rate/loop
+// state, so there's no race to coordinate and no extra network traffic.
+// The actual audible loop instead uses the native
+// AudioBufferSourceNode.loop/loopStart/loopEnd (sample-accurate, no JS
+// involved in the wrap itself) - see scheduleAudioAction.
+let loopRegion = null; // {start_us, end_us, active} | null - null until a loop has ever been inserted this session
+
+const LOOP_BEAT_COUNT = 16;
+const LOOP_ACTIVE_COLOR = "rgba(255, 191, 0, 0.8)"; // amber
+const LOOP_INACTIVE_COLOR = "rgba(128, 128, 128, 0.15)"; // grey, ~15% opacity
+
+/// Wraps `rawPositionUs` into the active loop's bounds if one exists and
+/// `anchorPositionUs` (the position this raw value was computed FROM) sits
+/// at or before the loop's end. Mirrors RoomState::position_at_with_loop
+/// server-side exactly, including the same guard against "snapping back" a
+/// position that was placed past the loop by an explicit seek/restart/
+/// cue-release rather than reached by continuous playback through it.
+function wrapPositionWithLoop(rawPositionUs, anchorPositionUs) {
+  if (!loopRegion || !loopRegion.active || loopRegion.end_us <= loopRegion.start_us) return rawPositionUs;
+  if (anchorPositionUs >= loopRegion.end_us || rawPositionUs < loopRegion.end_us) return rawPositionUs;
+  const loopLenUs = loopRegion.end_us - loopRegion.start_us;
+  const offsetUs = (rawPositionUs - loopRegion.start_us) % loopLenUs;
+  return loopRegion.start_us + offsetUs;
+}
+
+/// The Loop button is disabled until a BPM has been detected (no bpm, no
+/// way to compute "16 beats") - otherwise always enabled, since both of its
+/// behaviors (insert-new-loop, deactivate-loop-at-playhead) are valid in
+/// any other state.
+function updateLoopButtonUi() {
+  const btn = document.getElementById("loop-btn");
+  const connected = ws && ws.readyState === WebSocket.OPEN;
+  btn.disabled = !connected || detectedBaseBpm === null;
+}
+
+/// Reloop/exit is disabled whenever no loop has ever been inserted - both
+/// its behaviors (activate, deactivate) require an existing loop to act on.
+function updateReloopButtonUi() {
+  const btn = document.getElementById("reloop-btn");
+  const connected = ws && ws.readyState === WebSocket.OPEN;
+  btn.disabled = !connected || loopRegion === null;
 }
 
 /// Displays a playback_rate (0.94-1.06, where 1.0 is "no change") as a
@@ -493,6 +547,7 @@ function currentBpm() {
 function updateBpmDisplay(rate) {
   const el = document.getElementById("bpm-readout");
   el.textContent = detectedBaseBpm === null ? "--" : (detectedBaseBpm * rate).toFixed(1);
+  updateLoopButtonUi(); // the Loop button's enablement depends on detectedBaseBpm, which always changes alongside this display
 }
 
 /// BeatDetect.js's own analysis constants (public/vendor/beatdetect/BeatDetect.js)
@@ -679,9 +734,14 @@ function setSourceRate(newRate, atContextTime, rampDurationS = NUDGE_RAMP_S) {
   if (!currentSource || !currentSourceStart || !audioCtx) return;
   const targetCtxTime = atContextTime ?? audioCtx.currentTime;
   // Position at the target time, computed under the OLD rate, before we
-  // overwrite currentSourceStart/currentSourceRate below.
+  // overwrite currentSourceStart/currentSourceRate below. Loop-wrapped (see
+  // wrapPositionWithLoop) so a rebase that happens to land past an active
+  // loop's end doesn't bake an un-wrapped anchor into currentSourceStart -
+  // every future currentAudioPositionUs() call assumes that anchor is
+  // already loop-consistent.
   const elapsedToTargetS = Math.max(0, targetCtxTime - currentSourceStart.contextTime);
-  const positionAtTargetUs = currentSourceStart.positionUs + elapsedToTargetS * 1e6 * currentSourceRate;
+  const rawPositionAtTargetUs = currentSourceStart.positionUs + elapsedToTargetS * 1e6 * currentSourceRate;
+  const positionAtTargetUs = wrapPositionWithLoop(rawPositionAtTargetUs, currentSourceStart.positionUs);
 
   currentSourceStart = { contextTime: targetCtxTime, positionUs: positionAtTargetUs };
   currentSourceRate = newRate;
@@ -1021,6 +1081,7 @@ function scheduleAudioAction(action, effectiveServerTimeUs, positionUs, willBePl
       }
     };
     currentSource = source;
+    applyLoopRegionToCurrentSource(); // start already respecting whatever loop currently exists, if any
     // Fresh segment: don't inherit a rate/nudge/smoothing state that belonged
     // to whatever was playing before (e.g. right after a restart, drift and
     // any active correction from the pre-restart segment are meaningless).
@@ -1104,13 +1165,15 @@ function applySnapshot(msg) {
   applyBassCutEnabled(msg.bass_cut_enabled);
   applyPitchLockEnabled(msg.pitch_lock_enabled);
   cuePointUs = msg.cue_point_us;
-  window.updateCueMarker?.(cuePointUs);
+  loopRegion = msg.loop_region;
+  window.renderRegions?.({ cuePointUs, loopRegion });
+  updateReloopButtonUi();
   // A reconnect starts a fresh timeline - any buffered tempo samples belong
   // to a session that no longer exists, so drop them rather than let stale
   // pre-reconnect data leak into a post-reconnect interpolated render.
   tempoSampleBuffer = [];
   setStatusUi();
-  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled}, cue_point_us=${msg.cue_point_us})`);
+  log(`state_snapshot applied (revision ${msg.revision}, playing=${transport.playing}, nudge_enabled=${msg.nudge_enabled}, bass_cut_enabled=${msg.bass_cut_enabled}, pitch_lock_enabled=${msg.pitch_lock_enabled}, cue_point_us=${msg.cue_point_us}, loop_region=${JSON.stringify(msg.loop_region)})`);
 }
 
 function applyCuePointEvent(msg) {
@@ -1120,9 +1183,42 @@ function applyCuePointEvent(msg) {
   }
   lastAppliedRevision = msg.revision;
   cuePointUs = msg.position_us;
-  window.updateCueMarker?.(cuePointUs);
+  window.renderRegions?.({ cuePointUs, loopRegion });
   updateCueButtonUi();
   log(`cue_point_changed (revision ${msg.revision}): position ${msg.position_us}us`);
+}
+
+function applyLoopChangedEvent(msg) {
+  if (msg.revision <= lastAppliedRevision) {
+    log(`ignoring stale/duplicate loop_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+    return;
+  }
+  lastAppliedRevision = msg.revision;
+  loopRegion = { start_us: msg.start_us, end_us: msg.end_us, active: msg.active };
+  window.renderRegions?.({ cuePointUs, loopRegion });
+  updateReloopButtonUi();
+  applyLoopRegionToCurrentSource();
+  log(`loop_changed (revision ${msg.revision}): [${msg.start_us}, ${msg.end_us}) active=${msg.active}`);
+}
+
+/// Applies the current loopRegion to currentSource's native loop/loopStart/
+/// loopEnd. These are plain attributes, not AudioParams - the spec allows
+/// changing them on an already-started, already-playing node, taking effect
+/// on its very next loop-boundary check - so toggling a loop active/inactive
+/// (or inserting a new one at the current position, which by construction
+/// never moves the playhead) never needs to restart/recreate the source.
+/// Called both here (an existing source, loop state changed) and from
+/// scheduleAudioAction right after creating a fresh source (a source that
+/// needs to start already respecting whatever loop currently exists).
+function applyLoopRegionToCurrentSource() {
+  if (!currentSource) return;
+  if (loopRegion && loopRegion.active) {
+    currentSource.loop = true;
+    currentSource.loopStart = loopRegion.start_us / 1e6;
+    currentSource.loopEnd = loopRegion.end_us / 1e6;
+  } else {
+    currentSource.loop = false;
+  }
 }
 
 function applyTransportEvent(msg) {
@@ -1188,17 +1284,19 @@ function connect() {
 
   ws.addEventListener("open", () => {
     log(`connected to ${wsUrl}`);
-    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
+    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = false;
     }
     updateCueButtonUi(); // refine cue-btn further: may re-disable if playing with no cue point yet
+    updateLoopButtonUi(); // refine loop-btn further: may re-disable if no BPM detected yet
+    updateReloopButtonUi(); // refine reloop-btn further: may re-disable if no loop exists yet
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
     startPeriodicResync();
   });
 
   ws.addEventListener("close", () => {
     log("disconnected; retrying in 1s");
-    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
+    for (const btn of ["play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn", "state-btn", "resync-btn", "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox", "pitch-lock-checkbox", "drift-calibration-checkbox"]) {
       document.getElementById(btn).disabled = true;
     }
     stopPeriodicResync();
@@ -1242,6 +1340,9 @@ function connect() {
         break;
       case "cue_point_changed":
         applyCuePointEvent(msg);
+        break;
+      case "loop_changed":
+        applyLoopChangedEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
@@ -1343,6 +1444,44 @@ function releaseCuePreview() {
   cueBtnEl.addEventListener("pointercancel", releaseCuePreview);
 }
 
+document.getElementById("loop-btn").addEventListener("click", () => {
+  const nowServerUs = estimateServerTimeUs();
+  if (nowServerUs === null || detectedBaseBpm === null) return; // button is disabled in this state anyway
+  const positionUs = currentModelPositionUs(nowServerUs);
+  const withinActiveLoop =
+    loopRegion && loopRegion.active && positionUs >= loopRegion.start_us && positionUs < loopRegion.end_us;
+  if (withinActiveLoop) {
+    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: false }));
+  } else {
+    // 16 beats of *content* time (detectedBaseBpm, the track's own nominal
+    // tempo) - not currentBpm()/transport.playback_rate, since loop bounds
+    // live in position_us (buffer-content time), which is independent of
+    // however fast we're currently playing it back.
+    const loopDurationUs = Math.round(LOOP_BEAT_COUNT * (60 / detectedBaseBpm) * 1e6);
+    const startUs = Math.round(positionUs);
+    ws.send(
+      JSON.stringify({
+        type: "set_loop",
+        request_id: `request-${randomId()}`,
+        start_us: startUs,
+        end_us: startUs + loopDurationUs,
+      })
+    );
+  }
+});
+
+document.getElementById("reloop-btn").addEventListener("click", () => {
+  if (!loopRegion) return; // button is disabled in this state anyway
+  if (loopRegion.active) {
+    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: false }));
+  } else {
+    ws.send(JSON.stringify({ type: "set_loop_active", request_id: `request-${randomId()}`, active: true }));
+    // A plain seek preserves whatever play state currently holds: playing
+    // -> plays the loop from the cue point; paused -> stays paused there.
+    sendSeekRequest(cuePointUs);
+  }
+});
+
 /// Called from waveform.js (a separate `type="module"` script, so it can't
 /// see this classic script's `ws`/`randomId` directly) whenever the user
 /// clicks/drags the waveform to seek. Exposed on `window` deliberately,
@@ -1352,10 +1491,11 @@ function sendSeekRequest(positionUs) {
   ws.send(JSON.stringify({ type: "seek_request", request_id: `request-${randomId()}`, position_us: positionUs }));
 }
 window.sendSeekRequest = sendSeekRequest;
-// Read by waveform.js's "decode" handler to re-apply the cue marker onto a
-// newly-loaded file - same explicit-bridge convention as sendSeekRequest,
-// in the opposite direction.
+// Read by waveform.js's "decode" handler to re-apply the cue marker/loop
+// region onto a newly-loaded file - same explicit-bridge convention as
+// sendSeekRequest, in the opposite direction.
 window.getCuePointUs = () => cuePointUs;
+window.getLoopRegion = () => loopRegion;
 document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });
