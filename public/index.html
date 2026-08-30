@@ -2,11 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Shared Audio Clock - PoC</title>
+<title>Multi-client DJ Server</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, sans-serif; max-width: 1600px; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
   h1 { font-size: 1.3rem; }
+  .alpha-badge { font-size: 0.55em; padding: 0 0.4em; color: #8888; }
   h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
   section { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
   button { font-size: 1rem; padding: 0.4rem 1rem; margin-right: 0.5rem; }
@@ -15,17 +16,187 @@
   #log { height: 180px; overflow-y: auto; background: #0002; font-family: ui-monospace, monospace; font-size: 0.8rem; padding: 0.5rem; white-space: pre-wrap; }
   .playing { color: #2a2; }
   .paused { color: #a22; }
-  progress { width: 100%; }
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
-  .waveform { margin-top: 0.5rem; cursor: pointer; }
+  .waveform { margin: 0.5rem 0 1rem; cursor: pointer; }
   .decks { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
   .deck { flex: 1 1 480px; min-width: 380px; }
   .deck h3 { font-size: 0.95rem; margin: 1rem 0 0.25rem; }
   .deck h3:first-of-type { margin-top: 0; }
+  .deck-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .deck-header h2 { margin: 0; }
+  .file-controls { color: #8888; font-size: 0.9rem; }
+  .measurements summary { cursor: pointer; font-size: 0.95rem; margin: 1rem 0 0.25rem; }
+  .measurements[open] summary { margin-bottom: 0.5rem; }
 </style>
 </head>
 <body>
-<h1>Shared Audio Clock — Proof of Concept</h1>
+<h1>Multi-client DJ Server<sup class="alpha-badge">PRE-ALPHA</sup></h1>
+
+<div class="decks">
+<section class="deck">
+  <div class="deck-header">
+    <h2>Deck A</h2>
+    <span class="file-controls">
+      <input type="file" id="file-input-a" accept="audio/*" />
+      <span id="file-status-a">no file loaded</span>
+    </span>
+  </div>
+  <div class="waveform" id="waveform-a"></div>
+
+  <h3>Transport</h3>
+  <button id="play-pause-btn-a" disabled>Play / Pause</button>
+  <button id="restart-btn-a" disabled>⏮ Skip back</button>
+  <button id="cue-btn-a" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="loop-btn-a" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
+  <button id="reloop-btn-a" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
+  <p>
+    <label title="Synced room-wide">
+      Tempo<span id="pitch-lock-note-a">, pitch-locked</span>: <span id="tempo-readout-a">0.0%</span>
+      — BPM: <span id="bpm-readout-a">--</span>
+      <input type="range" id="tempo-slider-a" min="0.94" max="1.06" step="0.001" value="1" disabled />
+    </label>
+  </p>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="pitch-lock-checkbox-a" checked disabled />
+      Pitch lock
+    </label>
+  </p>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="bass-cut-checkbox-a" disabled />
+      Cut bass
+    </label>
+  </p>
+  <p>
+    Status: <span id="transport-status-a" class="paused">unknown</span> —
+    position: <span id="position-readout-a">0.000s</span>
+  </p>
+
+  <h3>Settings</h3>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="nudge-enabled-checkbox-a" checked disabled />
+      Tempo nudge drift correction
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="drift-calibration-checkbox-a" checked disabled title="Local only, not synced. Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
+      Drift calibration
+    </label>
+  </p>
+  <p>
+    <label title="Local only, not synced - remembered in a cookie. Which library analyses the loaded file for its tempo.">
+      BPM detection engine:
+      <select id="bpm-engine-select-a">
+        <option value="wabd">web-audio-beat-detector</option>
+        <option value="beatdetect">BeatDetect.js</option>
+      </select>
+    </label>
+  </p>
+
+  <details class="measurements">
+    <summary>Measurements</summary>
+    <table>
+      <tr><th>revision</th><td id="m-revision-a">-</td></tr>
+      <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-a">-</td></tr>
+      <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-a">-</td></tr>
+      <tr><th>last scheduling_error_us</th><td id="m-error-a">-</td></tr>
+      <tr><th>live playback drift (audio − model), us</th><td id="m-drift-a">-</td></tr>
+      <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-a">-</td></tr>
+      <tr><th>local rate nudge</th><td id="m-nudge-a">off</td></tr>
+      <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-a">-</td></tr>
+      <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-a">-</td></tr>
+      <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-a">-</td></tr>
+      <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-a">0</td></tr>
+      <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-a">-</td></tr>
+    </table>
+  </details>
+</section>
+
+<section class="deck">
+  <div class="deck-header">
+    <h2>Deck B</h2>
+    <span class="file-controls">
+      <input type="file" id="file-input-b" accept="audio/*" />
+      <span id="file-status-b">no file loaded</span>
+    </span>
+  </div>
+  <div class="waveform" id="waveform-b"></div>
+
+  <h3>Transport</h3>
+  <button id="play-pause-btn-b" disabled>Play / Pause</button>
+  <button id="restart-btn-b" disabled>⏮ Skip back</button>
+  <button id="cue-btn-b" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
+  <button id="loop-btn-b" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
+  <button id="reloop-btn-b" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
+  <p>
+    <label title="Synced room-wide">
+      Tempo<span id="pitch-lock-note-b">, pitch-locked</span>: <span id="tempo-readout-b">0.0%</span>
+      — BPM: <span id="bpm-readout-b">--</span>
+      <input type="range" id="tempo-slider-b" min="0.94" max="1.06" step="0.001" value="1" disabled />
+    </label>
+  </p>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="pitch-lock-checkbox-b" checked disabled />
+      Pitch lock
+    </label>
+  </p>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="bass-cut-checkbox-b" disabled />
+      Cut bass
+    </label>
+  </p>
+  <p>
+    Status: <span id="transport-status-b" class="paused">unknown</span> —
+    position: <span id="position-readout-b">0.000s</span>
+  </p>
+
+  <h3>Settings</h3>
+  <p>
+    <label title="Synced room-wide">
+      <input type="checkbox" id="nudge-enabled-checkbox-b" checked disabled />
+      Tempo nudge drift correction
+    </label>
+  </p>
+  <p>
+    <label>
+      <input type="checkbox" id="drift-calibration-checkbox-b" checked disabled title="Local only, not synced. Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
+      Drift calibration
+    </label>
+  </p>
+  <p>
+    <label title="Local only, not synced - remembered in a cookie. Which library analyses the loaded file for its tempo.">
+      BPM detection engine:
+      <select id="bpm-engine-select-b">
+        <option value="wabd">web-audio-beat-detector</option>
+        <option value="beatdetect">BeatDetect.js</option>
+      </select>
+    </label>
+  </p>
+
+  <details class="measurements">
+    <summary>Measurements</summary>
+    <table>
+      <tr><th>revision</th><td id="m-revision-b">-</td></tr>
+      <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-b">-</td></tr>
+      <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-b">-</td></tr>
+      <tr><th>last scheduling_error_us</th><td id="m-error-b">-</td></tr>
+      <tr><th>live playback drift (audio − model), us</th><td id="m-drift-b">-</td></tr>
+      <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-b">-</td></tr>
+      <tr><th>local rate nudge</th><td id="m-nudge-b">off</td></tr>
+      <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-b">-</td></tr>
+      <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-b">-</td></tr>
+      <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-b">-</td></tr>
+      <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-b">0</td></tr>
+      <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-b">-</td></tr>
+    </table>
+  </details>
+</section>
+</div>
 
 <section>
   <strong>Connection</strong><br>
@@ -37,162 +208,6 @@
     <tr><th>best clock_sample_rtt_us</th><td id="m-rtt">-</td></tr>
   </table>
 </section>
-
-<div class="decks">
-<section class="deck">
-  <h2>Deck A</h2>
-
-  <h3>Load file</h3>
-  <input type="file" id="file-input-a" accept="audio/*" />
-  <span id="file-status-a">no file loaded</span>
-
-  <h3>Transport</h3>
-  <button id="play-pause-btn-a" disabled>Play / Pause</button>
-  <button id="restart-btn-a" disabled>⏮ Skip back</button>
-  <button id="cue-btn-a" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
-  <button id="loop-btn-a" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
-  <button id="reloop-btn-a" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
-  <p>
-    <label>
-      <input type="checkbox" id="nudge-enabled-checkbox-a" checked disabled />
-      Tempo nudge drift correction (synced room-wide)
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="drift-calibration-checkbox-a" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
-      Drift calibration (local only, not synced)
-    </label>
-  </p>
-  <p>
-    <label>
-      Tempo (synced room-wide<span id="pitch-lock-note-a">, pitch-locked</span>): <span id="tempo-readout-a">0.0%</span>
-      — BPM: <span id="bpm-readout-a">--</span>
-      <input type="range" id="tempo-slider-a" min="0.94" max="1.06" step="0.001" value="1" disabled />
-    </label>
-  </p>
-  <p>
-    <label title="Which library analyses the loaded file for its tempo. Local only, not synced - remembered in a cookie.">
-      BPM detection engine (local only):
-      <select id="bpm-engine-select-a">
-        <option value="wabd">web-audio-beat-detector</option>
-        <option value="beatdetect">BeatDetect.js</option>
-      </select>
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="pitch-lock-checkbox-a" checked disabled />
-      Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="bass-cut-checkbox-a" disabled />
-      Cut bass (synced room-wide)
-    </label>
-  </p>
-  <p>
-    Status: <span id="transport-status-a" class="paused">unknown</span> —
-    position: <span id="position-readout-a">0.000s</span>
-  </p>
-  <progress id="position-bar-a" value="0" max="1"></progress>
-  <div class="waveform" id="waveform-a"></div>
-
-  <h3>Measurements</h3>
-  <table>
-    <tr><th>revision</th><td id="m-revision-a">-</td></tr>
-    <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-a">-</td></tr>
-    <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-a">-</td></tr>
-    <tr><th>last scheduling_error_us</th><td id="m-error-a">-</td></tr>
-    <tr><th>live playback drift (audio − model), us</th><td id="m-drift-a">-</td></tr>
-    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-a">-</td></tr>
-    <tr><th>local rate nudge</th><td id="m-nudge-a">off</td></tr>
-    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-a">-</td></tr>
-    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-a">-</td></tr>
-    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-a">-</td></tr>
-    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-a">0</td></tr>
-    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-a">-</td></tr>
-  </table>
-</section>
-
-<section class="deck">
-  <h2>Deck B</h2>
-
-  <h3>Load file</h3>
-  <input type="file" id="file-input-b" accept="audio/*" />
-  <span id="file-status-b">no file loaded</span>
-
-  <h3>Transport</h3>
-  <button id="play-pause-btn-b" disabled>Play / Pause</button>
-  <button id="restart-btn-b" disabled>⏮ Skip back</button>
-  <button id="cue-btn-b" disabled title="Paused, inside a loop: removes the loop. Paused, away from the cue point: sets a new cue point here. Paused, exactly at the cue point: hold to preview from there, release to snap back and pause. Playing: pauses and resets the playhead to the cue point.">Cue</button>
-  <button id="loop-btn-b" disabled title="No active loop at the playhead: inserts and activates a 16-beat loop here (moves the cue point to its start). Active loop at the playhead: deactivates it.">Loop</button>
-  <button id="reloop-btn-b" disabled title="Active loop: deactivates it. Inactive loop: re-activates it and jumps to its start (plays from there if already playing, otherwise stays paused there). Disabled until a loop exists.">Reloop / exit</button>
-  <p>
-    <label>
-      <input type="checkbox" id="nudge-enabled-checkbox-b" checked disabled />
-      Tempo nudge drift correction (synced room-wide)
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="drift-calibration-checkbox-b" checked disabled title="Learns this browser's fixed measurement bias once per session and corrects it directly instead of letting the nudge fight it; uncheck to compare against the old raw-drift-chasing nudge" />
-      Drift calibration (local only, not synced)
-    </label>
-  </p>
-  <p>
-    <label>
-      Tempo (synced room-wide<span id="pitch-lock-note-b">, pitch-locked</span>): <span id="tempo-readout-b">0.0%</span>
-      — BPM: <span id="bpm-readout-b">--</span>
-      <input type="range" id="tempo-slider-b" min="0.94" max="1.06" step="0.001" value="1" disabled />
-    </label>
-  </p>
-  <p>
-    <label title="Which library analyses the loaded file for its tempo. Local only, not synced - remembered in a cookie.">
-      BPM detection engine (local only):
-      <select id="bpm-engine-select-b">
-        <option value="wabd">web-audio-beat-detector</option>
-        <option value="beatdetect">BeatDetect.js</option>
-      </select>
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="pitch-lock-checkbox-b" checked disabled />
-      Pitch lock (synced room-wide) - toggle to A/B compare against plain resampling by ear
-    </label>
-  </p>
-  <p>
-    <label>
-      <input type="checkbox" id="bass-cut-checkbox-b" disabled />
-      Cut bass (synced room-wide)
-    </label>
-  </p>
-  <p>
-    Status: <span id="transport-status-b" class="paused">unknown</span> —
-    position: <span id="position-readout-b">0.000s</span>
-  </p>
-  <progress id="position-bar-b" value="0" max="1"></progress>
-  <div class="waveform" id="waveform-b"></div>
-
-  <h3>Measurements</h3>
-  <table>
-    <tr><th>revision</th><td id="m-revision-b">-</td></tr>
-    <tr><th>last scheduled_server_time_us</th><td id="m-scheduled-b">-</td></tr>
-    <tr><th>last estimated_actual_server_time_us</th><td id="m-actual-b">-</td></tr>
-    <tr><th>last scheduling_error_us</th><td id="m-error-b">-</td></tr>
-    <tr><th>live playback drift (audio − model), us</th><td id="m-drift-b">-</td></tr>
-    <tr><th>smoothed drift (nudge control input), us</th><td id="m-drift-smoothed-b">-</td></tr>
-    <tr><th>local rate nudge</th><td id="m-nudge-b">off</td></tr>
-    <tr><th>tempo interpolation-buffer delay, ms</th><td id="m-tempo-delay-b">-</td></tr>
-    <tr><th>tempo samples sent (last 1s)</th><td id="m-tempo-send-rate-b">-</td></tr>
-    <tr><th>last received tempo sample interval, ms</th><td id="m-tempo-interval-b">-</td></tr>
-    <tr><th>discarded stale tempo samples (total)</th><td id="m-tempo-discarded-b">0</td></tr>
-    <tr><th>last tempo release round-trip, ms</th><td id="m-tempo-release-rtt-b">-</td></tr>
-  </table>
-</section>
-</div>
 
 <section>
   <strong>Log</strong>
@@ -1336,8 +1351,6 @@ function createDeck(deckId) {
       const positionUs = currentModelPositionUs(nowServerUs);
       el("position-readout").textContent = `${(positionUs / 1e6).toFixed(3)}s`;
       if (audioBuffer) {
-        el("position-bar").max = audioBuffer.duration;
-        el("position-bar").value = positionUs / 1e6;
         // Drives the waveform's visual playhead from the same shared model
         // position. setTime() never emits wavesurfer's "interaction" event
         // (only genuine clicks/drags do), so this can't loop back into a
