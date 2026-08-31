@@ -177,6 +177,7 @@ fn deck_state_dto(deck: &DeckState) -> DeckStateDto {
         nudge_enabled: deck.nudge_enabled,
         bass_cut_enabled: deck.bass_cut_enabled,
         pitch_lock_enabled: deck.pitch_lock_enabled,
+        pfl_enabled: deck.pfl_enabled,
         cue_point_us: deck.cue_point_us,
         loop_region: deck
             .loop_region
@@ -188,6 +189,9 @@ async fn build_snapshot(state: &Arc<AppState>) -> ServerMessage {
     let room = state.room.lock().await;
     ServerMessage::StateSnapshot {
         server_time_us: state.clock.now_us(),
+        crossfader_revision: room.crossfader_revision,
+        crossfader_position: room.crossfader_position,
+        crossfader_curve_shape: room.crossfader_curve_shape,
         deck_a: deck_state_dto(&room.deck_a),
         deck_b: deck_state_dto(&room.deck_b),
     }
@@ -261,6 +265,9 @@ async fn handle_client_message(
         ClientMessage::SetPitchLockEnabled { request_id, deck, enabled } => {
             handle_set_pitch_lock_enabled(request_id, deck, enabled, state, connection_id).await;
         }
+        ClientMessage::SetPflEnabled { request_id, deck, enabled } => {
+            handle_set_pfl_enabled(request_id, deck, enabled, state, connection_id).await;
+        }
         ClientMessage::SeekRequest { request_id, deck, position_us } => {
             handle_seek_request(request_id, deck, position_us, state, connection_id).await;
         }
@@ -278,6 +285,12 @@ async fn handle_client_message(
         }
         ClientMessage::RemoveLoop { request_id, deck } => {
             handle_remove_loop(request_id, deck, state, connection_id).await;
+        }
+        ClientMessage::SetCrossfaderPosition { request_id, position } => {
+            handle_set_crossfader_position(request_id, position, state, connection_id).await;
+        }
+        ClientMessage::SetCrossfaderCurve { request_id, shape } => {
+            handle_set_crossfader_curve(request_id, shape, state, connection_id).await;
         }
     }
 }
@@ -782,6 +795,80 @@ async fn handle_remove_loop(
     let _ = state.events.send(event);
 }
 
+async fn handle_set_crossfader_position(request_id: String, position: f64, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_crossfader_position request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_crossfader_position(position)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        position,
+        revision = event_data.revision,
+        connected_client_count,
+        "crossfader position change accepted"
+    );
+
+    let event = ServerMessage::CrossfaderPositionChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        position: event_data.value,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_crossfader_curve(request_id: String, shape: f64, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_crossfader_curve request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.set_crossfader_curve_shape(shape)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        shape,
+        revision = event_data.revision,
+        connected_client_count,
+        "crossfader curve change accepted"
+    );
+
+    let event = ServerMessage::CrossfaderCurveChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        revision: event_data.revision,
+        shape: event_data.value,
+    };
+
+    let _ = state.events.send(event);
+}
+
 async fn handle_set_bass_cut_enabled(
     request_id: String,
     deck: DeckId,
@@ -861,6 +948,51 @@ async fn handle_set_pitch_lock_enabled(
     );
 
     let event = ServerMessage::PitchLockSettingChanged {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        deck,
+        revision: event_data.revision,
+        enabled: event_data.enabled,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_set_pfl_enabled(
+    request_id: String,
+    deck: DeckId,
+    enabled: bool,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate set_pfl_enabled request ignored");
+            return;
+        }
+    }
+
+    let event_data = {
+        let mut room = state.room.lock().await;
+        room.deck_mut(deck).set_pfl_enabled(enabled)
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        ?deck,
+        enabled,
+        revision = event_data.revision,
+        connected_client_count,
+        "pfl setting change accepted"
+    );
+
+    let event = ServerMessage::PflSettingChanged {
         event_id,
         request_id,
         origin_connection_id: connection_id,

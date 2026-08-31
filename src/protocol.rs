@@ -69,6 +69,7 @@ pub struct DeckStateDto {
     pub nudge_enabled: bool,
     pub bass_cut_enabled: bool,
     pub pitch_lock_enabled: bool,
+    pub pfl_enabled: bool,
     pub cue_point_us: Option<u64>,
     pub loop_region: Option<LoopRegionDto>,
 }
@@ -114,6 +115,18 @@ pub enum ClientMessage {
     /// client-side, synced the same way as the nudge-enabled and bass-cut
     /// settings.
     SetPitchLockEnabled {
+        request_id: String,
+        deck: DeckId,
+        enabled: bool,
+    },
+    /// Toggles whether a deck is included in a headphone-role client's
+    /// local mix (pre-fader listen / "cue", in traditional mixer terms) -
+    /// a master-role client always hears every playing deck regardless of
+    /// this setting. Synced the same way as the other boolean settings;
+    /// which *hardware role* a given client plays is a separate, local-only
+    /// choice each client makes for itself (see the client's own "Hardware
+    /// role" selection), never sent to the server at all.
+    SetPflEnabled {
         request_id: String,
         deck: DeckId,
         enabled: bool,
@@ -169,6 +182,19 @@ pub enum ClientMessage {
         request_id: String,
         deck: DeckId,
     },
+    /// Sets the room's crossfader position (0.0 = fully Deck A, 1.0 = fully
+    /// Deck B), synced room-wide - not tied to either deck individually, so
+    /// unlike every other message above this one carries no `deck` field.
+    SetCrossfaderPosition {
+        request_id: String,
+        position: f64,
+    },
+    /// Sets the room's crossfader curve shape (0.0 = equal-power/smooth,
+    /// 1.0 = plateau/fast-cut), synced room-wide like the position itself.
+    SetCrossfaderCurve {
+        request_id: String,
+        shape: f64,
+    },
 }
 
 impl ClientMessage {
@@ -181,12 +207,15 @@ impl ClientMessage {
             ClientMessage::SetTempoRequest { request_id, .. } => request_id,
             ClientMessage::SetBassCutEnabled { request_id, .. } => request_id,
             ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
+            ClientMessage::SetPflEnabled { request_id, .. } => request_id,
             ClientMessage::SeekRequest { request_id, .. } => request_id,
             ClientMessage::SetCuePoint { request_id, .. } => request_id,
             ClientMessage::RemoveCuePoint { request_id, .. } => request_id,
             ClientMessage::SetLoop { request_id, .. } => request_id,
             ClientMessage::SetLoopActive { request_id, .. } => request_id,
             ClientMessage::RemoveLoop { request_id, .. } => request_id,
+            ClientMessage::SetCrossfaderPosition { request_id, .. } => request_id,
+            ClientMessage::SetCrossfaderCurve { request_id, .. } => request_id,
         }
     }
 
@@ -213,6 +242,18 @@ impl ClientMessage {
             }
         }
 
+        if let ClientMessage::SetCrossfaderPosition { position, .. } = self {
+            if !(0.0..=1.0).contains(position) {
+                return Err("position must be between 0.0 and 1.0".to_string());
+            }
+        }
+
+        if let ClientMessage::SetCrossfaderCurve { shape, .. } = self {
+            if !(0.0..=1.0).contains(shape) {
+                return Err("shape must be between 0.0 and 1.0".to_string());
+            }
+        }
+
         Ok(())
     }
 }
@@ -227,6 +268,9 @@ pub enum ServerMessage {
     },
     StateSnapshot {
         server_time_us: u64,
+        crossfader_revision: u64,
+        crossfader_position: f64,
+        crossfader_curve_shape: f64,
         deck_a: DeckStateDto,
         deck_b: DeckStateDto,
     },
@@ -264,6 +308,14 @@ pub enum ServerMessage {
         enabled: bool,
     },
     PitchLockSettingChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        deck: DeckId,
+        revision: u64,
+        enabled: bool,
+    },
+    PflSettingChanged {
         event_id: Uuid,
         request_id: String,
         origin_connection_id: Uuid,
@@ -318,6 +370,26 @@ pub enum ServerMessage {
         origin_connection_id: Uuid,
         deck: DeckId,
         revision: u64,
+    },
+    /// Broadcast whenever the room's crossfader position changes (see
+    /// `ClientMessage::SetCrossfaderPosition`). Shares a revision counter
+    /// with `CrossfaderCurveChanged` - not tied to either deck.
+    CrossfaderPositionChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        position: f64,
+    },
+    /// Broadcast whenever the room's crossfader curve shape changes (see
+    /// `ClientMessage::SetCrossfaderCurve`). Shares its revision counter
+    /// with `CrossfaderPositionChanged`.
+    CrossfaderCurveChanged {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        revision: u64,
+        shape: f64,
     },
     Error {
         request_id: Option<String>,
@@ -680,11 +752,15 @@ mod tests {
             nudge_enabled: true,
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
+            pfl_enabled: false,
             cue_point_us: Some(6_000_000),
             loop_region: Some(LoopRegionDto { start_us: 6_000_000, end_us: 10_000_000, active: true }),
         };
         let msg = ServerMessage::StateSnapshot {
             server_time_us: 48_111_492,
+            crossfader_revision: 3,
+            crossfader_position: 0.5,
+            crossfader_curve_shape: 0.5,
             deck_a: deck_dto.clone(),
             deck_b: DeckStateDto {
                 revision: 0,
@@ -697,12 +773,16 @@ mod tests {
                 nudge_enabled: true,
                 bass_cut_enabled: false,
                 pitch_lock_enabled: true,
+                pfl_enabled: false,
                 cue_point_us: None,
                 loop_region: None,
             },
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "state_snapshot");
+        assert_eq!(json["crossfader_revision"], 3);
+        assert_eq!(json["crossfader_position"], 0.5);
+        assert_eq!(json["crossfader_curve_shape"], 0.5);
         assert_eq!(json["deck_a"]["transport"]["playing"], true);
         assert_eq!(json["deck_a"]["nudge_enabled"], true);
         assert_eq!(json["deck_a"]["bass_cut_enabled"], false);
@@ -713,6 +793,91 @@ mod tests {
         assert_eq!(json["deck_a"]["loop_region"]["active"], true);
         assert_eq!(json["deck_b"]["transport"]["playing"], false);
         assert!(json["deck_b"]["cue_point_us"].is_null());
+    }
+
+    #[test]
+    fn deserializes_set_crossfader_position() {
+        let json = r#"{"type":"set_crossfader_position","request_id":"request-110","position":0.25}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetCrossfaderPosition { request_id, position } => {
+                assert_eq!(request_id, "request-110");
+                assert_eq!(position, 0.25);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn rejects_crossfader_position_outside_bounds() {
+        let json = r#"{"type":"set_crossfader_position","request_id":"r","position":1.5}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_err());
+
+        let json = r#"{"type":"set_crossfader_position","request_id":"r","position":-0.1}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_crossfader_position_at_the_bounds() {
+        let json = r#"{"type":"set_crossfader_position","request_id":"r","position":0.0}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_ok());
+
+        let json = r#"{"type":"set_crossfader_position","request_id":"r","position":1.0}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn serializes_crossfader_position_changed() {
+        let msg = ServerMessage::CrossfaderPositionChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-110".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 1,
+            position: 0.25,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "crossfader_position_changed");
+        assert_eq!(json["position"], 0.25);
+        assert_eq!(json["revision"], 1);
+    }
+
+    #[test]
+    fn deserializes_set_crossfader_curve() {
+        let json = r#"{"type":"set_crossfader_curve","request_id":"request-111","shape":0.8}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetCrossfaderCurve { request_id, shape } => {
+                assert_eq!(request_id, "request-111");
+                assert_eq!(shape, 0.8);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn rejects_crossfader_curve_outside_bounds() {
+        let json = r#"{"type":"set_crossfader_curve","request_id":"r","shape":1.1}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.validate().is_err());
+    }
+
+    #[test]
+    fn serializes_crossfader_curve_changed() {
+        let msg = ServerMessage::CrossfaderCurveChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-111".to_string(),
+            origin_connection_id: Uuid::nil(),
+            revision: 2,
+            shape: 0.8,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "crossfader_curve_changed");
+        assert_eq!(json["shape"], 0.8);
+        assert_eq!(json["revision"], 2);
     }
 
     #[test]
@@ -823,6 +988,35 @@ mod tests {
         assert_eq!(json["type"], "pitch_lock_setting_changed");
         assert_eq!(json["enabled"], false);
         assert_eq!(json["revision"], 6);
+    }
+
+    #[test]
+    fn deserializes_set_pfl_enabled() {
+        let json = r#"{"type":"set_pfl_enabled","request_id":"request-99","deck":"a","enabled":true}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::SetPflEnabled { request_id, enabled, .. } => {
+                assert_eq!(request_id, "request-99");
+                assert!(enabled);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_pfl_setting_changed() {
+        let msg = ServerMessage::PflSettingChanged {
+            event_id: Uuid::nil(),
+            request_id: "request-99".to_string(),
+            origin_connection_id: Uuid::nil(),
+            deck: DeckId::A,
+            revision: 9,
+            enabled: true,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "pfl_setting_changed");
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["revision"], 9);
     }
 
     #[test]

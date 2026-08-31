@@ -107,6 +107,15 @@ pub struct DeckState {
     /// Whether clients should pitch-correct tempo changes. Same
     /// shared-revision convention as nudge_enabled.
     pub pitch_lock_enabled: bool,
+    /// Whether this deck is included in a headphone-role client's local
+    /// mix (pre-fader listen / "cue", in traditional mixer terms) - a
+    /// master-role client always hears every playing deck regardless of
+    /// this flag. Which hardware role a given client plays is a separate,
+    /// purely local choice each client makes for itself and never sends to
+    /// the server - this flag is the only part of that split that's
+    /// actually room state. Same shared-revision convention as
+    /// nudge_enabled.
+    pub pfl_enabled: bool,
     /// The room's single cue point, or `None` if nothing's been set yet.
     /// Same shared-revision convention as the settings above. `set_cue_point`
     /// overwrites it with a new position; `remove_cue_point` clears it back
@@ -125,6 +134,7 @@ impl DeckState {
             nudge_enabled: true,
             bass_cut_enabled: false,
             pitch_lock_enabled: true,
+            pfl_enabled: false,
             cue_point_us: None,
             loop_region: None,
             revision: 0,
@@ -215,6 +225,25 @@ impl DeckState {
             };
         }
         self.pitch_lock_enabled = enabled;
+        self.revision += 1;
+        BoolSettingEventData {
+            enabled,
+            revision: self.revision,
+            idempotent_replay: false,
+        }
+    }
+
+    /// Toggles the room-wide pre-fader-listen (PFL/"cue") setting. Same
+    /// idempotent convention as `set_nudge_enabled`.
+    pub fn set_pfl_enabled(&mut self, enabled: bool) -> BoolSettingEventData {
+        if self.pfl_enabled == enabled {
+            return BoolSettingEventData {
+                enabled,
+                revision: self.revision,
+                idempotent_replay: true,
+            };
+        }
+        self.pfl_enabled = enabled;
         self.revision += 1;
         BoolSettingEventData {
             enabled,
@@ -463,16 +492,33 @@ impl Default for DeckState {
 }
 
 /// The room holds two fully independent decks - own transport, cue point,
-/// loop, settings, and revision counter each. There's no cross-deck shared
-/// state at all (deliberately: sharing one revision counter across two
-/// independent decks would mean every handler needs to reason about which
-/// deck a given revision bump "belongs to" for no real benefit - two
-/// self-contained counters, one per deck, is simpler and exactly mirrors
-/// having two independent rooms that happen to share a connection).
+/// loop, settings, and revision counter each. Deliberately no *shared*
+/// revision counter between them: every handler would otherwise need to
+/// reason about which deck a given revision bump "belongs to" for no real
+/// benefit - two self-contained counters, one per deck, is simpler and
+/// exactly mirrors having two independent rooms that happen to share a
+/// connection.
+///
+/// The crossfader is the one genuinely room-level concept that isn't
+/// per-deck: it's not part of either deck's own state, so it gets its own
+/// independent revision counter here rather than being awkwardly attached
+/// to one deck (see DeckState's own per-deck revision for the reasoning
+/// this mirrors).
 #[derive(Debug, Clone)]
 pub struct RoomState {
     pub deck_a: DeckState,
     pub deck_b: DeckState,
+    /// 0.0 = fully Deck A, 1.0 = fully Deck B. Applied only to a deck's
+    /// contribution to the *master* mix - never to PFL, which by definition
+    /// (pre-fader listen) is unaffected by where the crossfader sits.
+    pub crossfader_position: f64,
+    /// 0.0 = equal-power/smooth blend, 1.0 = plateau/fast-cut. See
+    /// `public/crossfader-curve.js` for the actual gain curve this shapes -
+    /// server and client deliberately don't duplicate that math since the
+    /// server never needs to compute a gain itself, only store and
+    /// broadcast the two synced numbers that feed it.
+    pub crossfader_curve_shape: f64,
+    pub crossfader_revision: u64,
 }
 
 impl RoomState {
@@ -480,6 +526,9 @@ impl RoomState {
         Self {
             deck_a: DeckState::new(),
             deck_b: DeckState::new(),
+            crossfader_position: 0.5,
+            crossfader_curve_shape: 0.5,
+            crossfader_revision: 0,
         }
     }
 
@@ -496,6 +545,39 @@ impl RoomState {
             DeckId::B => &mut self.deck_b,
         }
     }
+
+    /// Sets the crossfader position, synced room-wide like a deck's tempo -
+    /// every listener should hear the same A/B balance in the master mix.
+    /// Always bumps the revision (like `DeckState::set_cue_point`/
+    /// `schedule_seek`) rather than the idempotent-by-value convention the
+    /// boolean settings use - this is a continuous control someone is
+    /// actively dragging, not a toggle where a redundant repeat is worth
+    /// specifically detecting.
+    pub fn set_crossfader_position(&mut self, position: f64) -> CrossfaderEventData {
+        self.crossfader_position = position;
+        self.crossfader_revision += 1;
+        CrossfaderEventData { value: position, revision: self.crossfader_revision }
+    }
+
+    /// Sets the crossfader curve shape. Same conventions as
+    /// `set_crossfader_position`, including sharing its revision counter -
+    /// a client tracks "have I applied the latest crossfader-related
+    /// change" with one counter covering both, exactly like a deck's own
+    /// `lastAppliedRevision` covers all of that deck's event types.
+    pub fn set_crossfader_curve_shape(&mut self, shape: f64) -> CrossfaderEventData {
+        self.crossfader_curve_shape = shape;
+        self.crossfader_revision += 1;
+        CrossfaderEventData { value: shape, revision: self.crossfader_revision }
+    }
+}
+
+/// The outcome of setting the room's crossfader position or curve shape,
+/// ready to be turned into that field's canonical `ServerMessage::*Changed`
+/// variant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrossfaderEventData {
+    pub value: f64,
+    pub revision: u64,
 }
 
 impl Default for RoomState {
@@ -961,6 +1043,37 @@ mod tests {
     }
 
     #[test]
+    fn pfl_enabled_defaults_to_false() {
+        let room = DeckState::new();
+        assert!(!room.pfl_enabled);
+    }
+
+    #[test]
+    fn set_pfl_enabled_toggles_and_bumps_revision() {
+        let mut room = DeckState::new();
+
+        let event = room.set_pfl_enabled(true);
+
+        assert!(event.enabled);
+        assert!(!event.idempotent_replay);
+        assert_eq!(event.revision, 1);
+        assert!(room.pfl_enabled);
+        assert_eq!(room.revision, 1);
+    }
+
+    #[test]
+    fn set_pfl_enabled_is_idempotent_when_unchanged() {
+        let mut room = DeckState::new();
+        room.set_pfl_enabled(true);
+        let revision_after_first_toggle = room.revision;
+
+        let replay = room.set_pfl_enabled(true);
+
+        assert!(replay.idempotent_replay);
+        assert_eq!(room.revision, revision_after_first_toggle);
+    }
+
+    #[test]
     fn set_bass_cut_enabled_toggles_and_bumps_revision() {
         let mut room = DeckState::new();
 
@@ -1135,5 +1248,51 @@ mod tests {
         assert_eq!(second.revision, after_play + 2);
         assert_eq!(third.revision, after_play + 3);
         assert_eq!(room.transport.playback_rate, 1.03);
+    }
+
+    #[test]
+    fn crossfader_defaults_to_centre() {
+        let room = RoomState::new();
+        assert_eq!(room.crossfader_position, 0.5);
+        assert_eq!(room.crossfader_curve_shape, 0.5);
+        assert_eq!(room.crossfader_revision, 0);
+    }
+
+    #[test]
+    fn set_crossfader_position_stores_value_and_bumps_revision() {
+        let mut room = RoomState::new();
+
+        let event = room.set_crossfader_position(0.2);
+
+        assert_eq!(event.value, 0.2);
+        assert_eq!(event.revision, 1);
+        assert_eq!(room.crossfader_position, 0.2);
+        assert_eq!(room.crossfader_revision, 1);
+    }
+
+    #[test]
+    fn set_crossfader_position_always_bumps_revision_even_to_the_same_value() {
+        let mut room = RoomState::new();
+        room.set_crossfader_position(0.2);
+        let revision_after_first_set = room.crossfader_revision;
+
+        let event = room.set_crossfader_position(0.2);
+
+        assert_eq!(event.revision, revision_after_first_set + 1);
+    }
+
+    #[test]
+    fn set_crossfader_curve_shape_stores_value_and_shares_revision_with_position() {
+        let mut room = RoomState::new();
+        room.set_crossfader_position(0.3);
+        let revision_after_position = room.crossfader_revision;
+
+        let event = room.set_crossfader_curve_shape(0.8);
+
+        assert_eq!(event.value, 0.8);
+        assert_eq!(event.revision, revision_after_position + 1);
+        assert_eq!(room.crossfader_curve_shape, 0.8);
+        // Setting the curve shape doesn't touch the independently-tracked position.
+        assert_eq!(room.crossfader_position, 0.3);
     }
 }

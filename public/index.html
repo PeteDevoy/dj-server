@@ -8,6 +8,11 @@
   body { font-family: system-ui, sans-serif; max-width: 1600px; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
   h1 { font-size: 1.3rem; }
   .alpha-badge { font-size: 0.55em; padding: 0 0.4em; color: #8888; }
+  .page-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1.5rem; flex-wrap: wrap; }
+  .page-header h1 { margin: 0; }
+  .hardware-role-panel { text-align: right; font-size: 0.9rem; }
+  .hardware-role-panel p { margin: 0.25rem 0; }
+  .hardware-role-panel input[type="range"] { width: 220px; margin-left: auto; }
   h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
   section { border: 1px solid #8884; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
   button { font-size: 1rem; padding: 0.4rem 1rem; margin-right: 0.5rem; }
@@ -19,6 +24,10 @@
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
   .waveform { margin: 0.5rem 0 1rem; cursor: pointer; }
   .decks { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+  .control-row { display: flex; gap: 1rem; align-items: stretch; flex-wrap: wrap; }
+  .control-box { flex: 1 1 0; min-width: 300px; }
+  .crossfader-labels { display: flex; justify-content: space-between; gap: 0.5rem; color: #8888; font-size: 0.8rem; line-height: 1.2; }
+  #crossfader-curve-canvas { display: block; width: 100%; max-width: 256px; height: 144px; border-radius: 6px; background: #101218; margin: 0.5rem 0 0.3rem; }
   .deck { flex: 1 1 480px; min-width: 380px; transition: outline-color 0.1s, background-color 0.1s; outline: 2px dashed transparent; outline-offset: -2px; }
   .deck.drag-over { outline-color: #3b82f6; background: #3b82f622; }
   .deck.drag-rejected { outline-color: #a22; background: #a2222222; cursor: not-allowed; }
@@ -31,12 +40,28 @@
   .flash-reject { animation: flash-reject 2s ease-in-out; }
   @keyframes flash-reject { 0%, 100% { color: inherit; } 15%, 45%, 75% { color: #c0392b; } 30%, 60%, 90% { color: inherit; } }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  #hardware-role-master, #hardware-role-headphones { margin-left: 0.75rem; }
   .measurements summary { cursor: pointer; font-size: 0.95rem; margin: 1rem 0 0.25rem; }
   .measurements[open] summary { margin-bottom: 0.5rem; }
 </style>
 </head>
 <body>
-<h1>Multi-client DJ Server<sup class="alpha-badge">PRE-ALPHA</sup></h1>
+<div class="page-header">
+  <h1>Multi-client DJ Server<sup class="alpha-badge">PRE-ALPHA</sup></h1>
+  <div class="hardware-role-panel">
+    <p title="Local only, not synced - this browser's own choice of which audio it plays, not a room-wide setting. Master source: hear every playing deck normally. Headphone source: hear a blend of the master mix and the PFL/cue mix, set by the Headphone mix slider below - so two devices can split a traditional mixer's master/PFL outputs between them.">
+      Hardware role:
+      <label><input type="radio" name="hardware-role" id="hardware-role-master" value="master" checked /> Master source</label>
+      <label><input type="radio" name="hardware-role" id="hardware-role-headphones" value="headphones" /> Headphone source</label>
+    </p>
+    <p id="headphone-mix-row" hidden>
+      <label title="Local only, not synced. Blends this client's headphone output between the master mix (left) and the PFL/cue mix (right) - purely master at the far left, purely PFL at the far right, an even blend at the centre. A deck with Pre-fader listen enabled stays at a constant volume across the whole slider (it's already in the master mix, so the two contributions trade off rather than stacking) - only decks without it fade with the slider.">
+        Headphone mix (master ↔ PFL):
+        <input type="range" id="headphone-mix-slider" min="0" max="1" step="0.01" value="1" />
+      </label>
+    </p>
+  </div>
+</div>
 
 <div class="decks">
 <section class="deck" id="deck-section-a">
@@ -72,6 +97,12 @@
     <label title="Synced room-wide">
       <input type="checkbox" id="bass-cut-checkbox-a" disabled />
       Cut bass
+    </label>
+  </p>
+  <p>
+    <label title="Synced room-wide. Only audible on a client whose Hardware role (top right) is set to headphone source - a master-source client always hears every playing deck regardless of this setting.">
+      <input type="checkbox" id="pfl-checkbox-a" disabled />
+      Pre-fader listen (cue)
     </label>
   </p>
   <p>
@@ -157,6 +188,12 @@
     </label>
   </p>
   <p>
+    <label title="Synced room-wide. Only audible on a client whose Hardware role (top right) is set to headphone source - a master-source client always hears every playing deck regardless of this setting.">
+      <input type="checkbox" id="pfl-checkbox-b" disabled />
+      Pre-fader listen (cue)
+    </label>
+  </p>
+  <p>
     Status: <span id="transport-status-b" class="paused">unknown</span> —
     position: <span id="position-readout-b">0.000s</span>
   </p>
@@ -204,7 +241,8 @@
 </section>
 </div>
 
-<section>
+<div class="control-row">
+<section class="control-box">
   <strong>Connection</strong><br>
   <button id="state-btn" disabled>Refresh state</button>
   <button id="resync-btn" disabled>Resync clock</button>
@@ -215,11 +253,39 @@
   </table>
 </section>
 
+<section class="control-box">
+  <strong>Crossfader</strong><br>
+  <p title="Synced room-wide - every listener hears the same Deck A / Deck B balance in the master mix. Never affects Pre-fader listen: PFL means exactly that, pre-FADER - what a cueing DJ hears is unaffected by where the crossfader sits.">
+    <input type="range" id="crossfader-slider" min="0" max="1" step="0.01" value="0.5" disabled />
+  </p>
+  <div class="crossfader-labels">
+    <span>Deck A</span>
+    <span id="crossfader-readout">A -- / B --</span>
+    <span>Deck B</span>
+  </div>
+</section>
+
+<section class="control-box">
+  <strong>Crossfader curve</strong><br>
+  <canvas id="crossfader-curve-canvas" width="512" height="288" aria-label="Complementary deck gain curves"></canvas>
+  <p title="Synced room-wide, like the crossfader position itself. Shapes how quickly Deck A and Deck B trade off across the crossfader's travel.">
+    <input type="range" id="crossfader-curve-slider" min="0" max="1" step="0.01" value="0.5" disabled
+           aria-label="Crossfader contour, smooth to fast cut" />
+  </p>
+  <div class="crossfader-labels">
+    <span>Smooth / equal-power</span>
+    <output id="crossfader-curve-amount">50%</output>
+    <span>Plateau / fast-cut</span>
+  </div>
+</section>
+</div>
+
 <section>
   <strong>Log</strong>
   <div id="log"></div>
 </section>
 
+<script src="crossfader-curve.js"></script>
 <script>
 "use strict";
 
@@ -594,8 +660,63 @@ const PLAYBACK_DRIFT_LOG_INTERVAL_MS = 5_000;
 const PER_DECK_CONNECTION_TOGGLE_IDS = [
   "play-pause-btn", "restart-btn", "cue-btn", "loop-btn", "reloop-btn",
   "nudge-enabled-checkbox", "tempo-slider", "bass-cut-checkbox",
-  "pitch-lock-checkbox", "drift-calibration-checkbox",
+  "pitch-lock-checkbox", "drift-calibration-checkbox", "pfl-checkbox",
 ];
+
+// Each deck's post-effects signal feeds two gain "sends" that both connect
+// to ctx.destination - a master send and a PFL send (see each deck's
+// ensureDeckMixSends/applyOutputGain). Web Audio sums whatever connects to
+// the same destination for free, so that pair of sends IS the mixer; no
+// separate summing node is needed. Ramped, like the bass-cut/pitch-lock
+// toggles, to avoid an audible click.
+const OUTPUT_GAIN_RAMP_S = 0.05;
+
+// Which audio this browser's own AudioContext actually plays - a purely
+// local, per-client choice (never sent to the server, never synced room-
+// wide): two physical devices in the same room can each pick a different
+// role to split a traditional mixer's master/PFL ("cue") outputs between
+// them. See the "Hardware role" radio group and each deck's PFL checkbox
+// (which IS room-wide - it's "should headphone-role clients include this
+// deck", not "am I a headphone").
+let hardwareRole = "master";
+
+// How a headphone-role client blends its two sends: 0 = pure master (this
+// deck's master-send gain is 1, PFL-send is 0, for every deck, regardless
+// of PFL), 1 = pure PFL (master-send 0, PFL-send is 1 if this deck has PFL
+// enabled else 0 - exactly the old hard on/off behavior, which is why this
+// defaults to 1: it's what a headphone client heard before this slider
+// existed). Irrelevant (and the slider hidden) in master role, where a
+// deck's master-send is always 1 and PFL-send always 0. See each deck's
+// applyOutputGain for why these two sends' weights are chosen to be
+// complementary rather than independent - it's what keeps a PFL-enabled
+// deck's volume constant across the whole slider instead of doubling at
+// the centre.
+let headphoneMixT = 1;
+
+// ---- crossfader (room-wide synced, unlike hardwareRole/headphoneMixT
+// above - the crossfader determines the actual audible Deck A/Deck B
+// balance in the master mix, so unlike a client's own local hardware
+// choices, every listener needs to agree on it, exactly like tempo) -------
+//
+// Not tied to either deck, so tracked with its own revision counter here
+// rather than living inside createDeck - mirrors DeckState's own
+// per-deck revision on the server (see RoomState::crossfader_revision).
+let crossfaderPosition = 0.5; // 0 = fully Deck A, 1 = fully Deck B
+let crossfaderCurveShape = 0.5; // 0 = equal-power/smooth, 1 = plateau/fast-cut - see crossfader-curve.js
+let lastAppliedCrossfaderRevision = -1;
+let crossfaderCurveVisualizer = null; // {redraw} - set once the canvas is wired up, below
+
+/// This deck's own crossfader-derived gain multiplier. Deck A and Deck B
+/// read mirrored positions on the same curve (crossfaderGain, from
+/// crossfader-curve.js) - at crossfaderPosition 0 deck A is at unity and
+/// deck B is silent, and vice versa at 1. Applied only to a deck's MASTER
+/// send (see createDeck's computeMixSendTargets), never to its PFL send:
+/// pre-fader listen means exactly that - what a cueing DJ hears through
+/// PFL is unaffected by where the crossfader/fader currently sits.
+function crossfaderGainForDeck(deckId) {
+  const x = deckId === "a" ? 1 - crossfaderPosition : crossfaderPosition;
+  return window.crossfaderGain(x, crossfaderCurveShape);
+}
 
 // ---- one independent DJ deck -----------------------------------------------
 //
@@ -679,9 +800,80 @@ function createDeck(deckId) {
       bassCutFilter.type = "highpass";
       bassCutFilter.Q.value = 0.707; // flat (Butterworth) response, no resonant peak at the cutoff
       bassCutFilter.frequency.value = bassCutEnabled ? BASS_CUT_ON_HZ : BASS_CUT_OFF_HZ;
-      bassCutFilter.connect(ctx.destination);
+      ensureDeckMixSends();
+      bassCutFilter.connect(masterSendGain);
+      bassCutFilter.connect(pflSendGain);
     }
     return bassCutFilter;
+  }
+
+  // Room-wide synced (like bass-cut/pitch-lock), but what it actually DOES
+  // is entirely local: it's one of the two inputs (alongside the local
+  // Hardware role/headphone-mix choices below) that decide whether, and how
+  // much, this deck is audible in THIS browser's own mix - it never touches
+  // the model/transport.
+  let pflEnabled = false;
+  let masterSendGain = null;
+  let pflSendGain = null;
+
+  /// Both weights this deck's send gains should carry right now, derived
+  /// from the current hardwareRole/headphoneMixT/pflEnabled/crossfader.
+  /// The crossfader only ever scales the MASTER send - PFL is pre-fader by
+  /// definition, unaffected by it. Master role: full (crossfader-scaled)
+  /// master send, no PFL send - a deck that's already fully audible via the
+  /// master send doesn't also need a PFL send stacked on top of it (that
+  /// would double it for a PFL-enabled deck). Headphone role: the two sends
+  /// are complementary fractions of headphoneMixT (master gets
+  /// (1-headphoneMixT), further scaled by the crossfader; PFL gets
+  /// headphoneMixT if this deck has PFL enabled) - deliberately NOT
+  /// independent, since that's what makes a PFL-enabled deck's total (both
+  /// sends, summed for free at ctx.destination) stay flat at 1 across the
+  /// whole slider instead of peaking at 2 in the middle, where a naive
+  /// "just add a PFL send" design would double it.
+  function computeMixSendTargets() {
+    const crossfaderTarget = crossfaderGainForDeck(deckId);
+    if (hardwareRole === "master") return { masterTarget: crossfaderTarget, pflTarget: 0 };
+    return { masterTarget: (1 - headphoneMixT) * crossfaderTarget, pflTarget: pflEnabled ? headphoneMixT : 0 };
+  }
+
+  /// Creates (once) the two gain nodes this deck's post-effects signal
+  /// fans out into, both connected straight to ctx.destination - Web Audio
+  /// sums whatever's connected to the same destination for free, so this
+  /// pair of sends already IS the mixer, with no separate summing node to
+  /// create or bypass. Sets their initial values directly (not ramped):
+  /// a brand-new GainNode defaults its gain to 1, and ramping FROM that
+  /// default would mean both sends briefly sit at 1 simultaneously right
+  /// as a deck starts - exactly the transient doubling this whole design
+  /// exists to avoid, just at node-creation time instead of on the slider.
+  function ensureDeckMixSends() {
+    if (!masterSendGain) {
+      const ctx = ensureAudioContext();
+      masterSendGain = ctx.createGain();
+      pflSendGain = ctx.createGain();
+      const { masterTarget, pflTarget } = computeMixSendTargets();
+      masterSendGain.gain.value = masterTarget;
+      pflSendGain.gain.value = pflTarget;
+      masterSendGain.connect(ctx.destination);
+      pflSendGain.connect(ctx.destination);
+    }
+  }
+
+  function rampGainTo(param, target) {
+    param.cancelScheduledValues(audioCtx.currentTime);
+    param.setValueAtTime(param.value, audioCtx.currentTime);
+    param.linearRampToValueAtTime(target, audioCtx.currentTime + OUTPUT_GAIN_RAMP_S);
+  }
+
+  /// Re-derives both send gains from the current hardwareRole/
+  /// headphoneMixT/pflEnabled and ramps each to match (see
+  /// computeMixSendTargets). Called whenever any of those three inputs
+  /// changes: this deck's own pflEnabled (room-wide), or the shared
+  /// hardwareRole/headphoneMixT (local, affecting both decks at once).
+  function applyOutputGain() {
+    if (!masterSendGain || !pflSendGain || !audioCtx) return;
+    const { masterTarget, pflTarget } = computeMixSendTargets();
+    rampGainTo(masterSendGain.gain, masterTarget);
+    rampGainTo(pflSendGain.gain, pflTarget);
   }
 
   /// The position this deck's currently-sounding source is actually at right
@@ -1230,12 +1422,19 @@ function createDeck(deckId) {
     param.linearRampToValueAtTime(target, audioCtx.currentTime + PITCH_LOCK_TOGGLE_RAMP_S);
   }
 
+  function applyPflEnabled(enabled) {
+    pflEnabled = enabled;
+    el("pfl-checkbox").checked = enabled;
+    applyOutputGain();
+  }
+
   function applySnapshot(dto) {
     transport = dto.transport;
     lastAppliedRevision = dto.revision;
     applyNudgeEnabled(dto.nudge_enabled);
     applyBassCutEnabled(dto.bass_cut_enabled);
     applyPitchLockEnabled(dto.pitch_lock_enabled);
+    applyPflEnabled(dto.pfl_enabled);
     cuePointUs = dto.cue_point_us;
     loopRegion = dto.loop_region;
     window.renderRegions?.(deckId, { cuePointUs, loopRegion });
@@ -1244,7 +1443,7 @@ function createDeck(deckId) {
     // to a session that no longer exists.
     tempoSampleBuffer = [];
     setStatusUi();
-    log(`state_snapshot applied (revision ${dto.revision}, playing=${transport.playing}, nudge_enabled=${dto.nudge_enabled}, bass_cut_enabled=${dto.bass_cut_enabled}, pitch_lock_enabled=${dto.pitch_lock_enabled}, cue_point_us=${dto.cue_point_us}, loop_region=${JSON.stringify(dto.loop_region)})`);
+    log(`state_snapshot applied (revision ${dto.revision}, playing=${transport.playing}, nudge_enabled=${dto.nudge_enabled}, bass_cut_enabled=${dto.bass_cut_enabled}, pitch_lock_enabled=${dto.pitch_lock_enabled}, pfl_enabled=${dto.pfl_enabled}, cue_point_us=${dto.cue_point_us}, loop_region=${JSON.stringify(dto.loop_region)})`);
   }
 
   function applyCuePointEvent(msg) {
@@ -1360,6 +1559,16 @@ function createDeck(deckId) {
     lastAppliedRevision = msg.revision;
     applyPitchLockEnabled(msg.enabled);
     log(`pitch_lock_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
+  }
+
+  function applyPflSettingEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate pfl_setting_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    applyPflEnabled(msg.enabled);
+    log(`pfl_setting_changed (revision ${msg.revision}): enabled=${msg.enabled}`);
   }
 
   // ---- per-frame update -----------------------------------------------------
@@ -1685,6 +1894,11 @@ function createDeck(deckId) {
     e.target.checked = pitchLockEnabled;
     ws.send(JSON.stringify({ type: "set_pitch_lock_enabled", request_id: `request-${randomId()}`, deck: deckId, enabled: desired }));
   });
+  el("pfl-checkbox").addEventListener("change", (e) => {
+    const desired = e.target.checked;
+    e.target.checked = pflEnabled;
+    ws.send(JSON.stringify({ type: "set_pfl_enabled", request_id: `request-${randomId()}`, deck: deckId, enabled: desired }));
+  });
   {
     const tempoSliderEl = el("tempo-slider");
     tempoSliderEl.addEventListener("pointerdown", () => { isDraggingLocally = true; });
@@ -1722,6 +1936,8 @@ function createDeck(deckId) {
     applyNudgeSettingEvent,
     applyBassCutSettingEvent,
     applyPitchLockSettingEvent,
+    applyPflSettingEvent,
+    applyOutputGain,
     applyCuePointEvent,
     applyCuePointRemovedEvent,
     applyLoopChangedEvent,
@@ -1745,6 +1961,64 @@ const deckA = createDeck("a");
 const deckB = createDeck("b");
 window.decks = { a: deckA, b: deckB };
 
+crossfaderCurveVisualizer = window.setupCrossfaderCurveCanvas(
+  document.getElementById("crossfader-curve-canvas"),
+  document.getElementById("crossfader-curve-slider"),
+  document.getElementById("crossfader-curve-amount"),
+);
+
+/// Shows each deck's current crossfader-derived gain as a percentage - a
+/// quick way to see the actual A/B balance without reading the raw slider
+/// value, especially once the curve shape makes that non-linear.
+function updateCrossfaderReadout() {
+  const a = Math.round(crossfaderGainForDeck("a") * 100);
+  const b = Math.round(crossfaderGainForDeck("b") * 100);
+  document.getElementById("crossfader-readout").textContent = `A ${a}% / B ${b}%`;
+}
+updateCrossfaderReadout();
+
+function applyCrossfaderSnapshot(msg) {
+  lastAppliedCrossfaderRevision = msg.crossfader_revision;
+  crossfaderPosition = msg.crossfader_position;
+  crossfaderCurveShape = msg.crossfader_curve_shape;
+  document.getElementById("crossfader-slider").value = crossfaderPosition;
+  document.getElementById("crossfader-curve-slider").value = crossfaderCurveShape;
+  crossfaderCurveVisualizer.redraw();
+  updateCrossfaderReadout();
+  deckA.applyOutputGain();
+  deckB.applyOutputGain();
+  log(`crossfader snapshot applied (revision ${msg.crossfader_revision}): position=${msg.crossfader_position}, curve_shape=${msg.crossfader_curve_shape}`);
+}
+
+function applyCrossfaderPositionEvent(msg) {
+  if (msg.revision <= lastAppliedCrossfaderRevision) {
+    log(`ignoring stale/duplicate crossfader_position_changed (revision ${msg.revision} <= ${lastAppliedCrossfaderRevision})`);
+    return;
+  }
+  lastAppliedCrossfaderRevision = msg.revision;
+  crossfaderPosition = msg.position;
+  document.getElementById("crossfader-slider").value = crossfaderPosition;
+  updateCrossfaderReadout();
+  deckA.applyOutputGain();
+  deckB.applyOutputGain();
+  log(`crossfader_position_changed (revision ${msg.revision}): position=${msg.position}`);
+}
+
+function applyCrossfaderCurveEvent(msg) {
+  if (msg.revision <= lastAppliedCrossfaderRevision) {
+    log(`ignoring stale/duplicate crossfader_curve_changed (revision ${msg.revision} <= ${lastAppliedCrossfaderRevision})`);
+    return;
+  }
+  lastAppliedCrossfaderRevision = msg.revision;
+  crossfaderCurveShape = msg.shape;
+  document.getElementById("crossfader-curve-slider").value = crossfaderCurveShape;
+  crossfaderCurveVisualizer.redraw();
+  updateCrossfaderReadout();
+  deckA.applyOutputGain();
+  deckB.applyOutputGain();
+  log(`crossfader_curve_changed (revision ${msg.revision}): shape=${msg.shape}`);
+}
+
 // ---- websocket -----------------------------------------------------------
 
 const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
@@ -1762,6 +2036,8 @@ function connect() {
     log(`connected to ${wsUrl}`);
     document.getElementById("state-btn").disabled = false;
     document.getElementById("resync-btn").disabled = false;
+    document.getElementById("crossfader-slider").disabled = false;
+    document.getElementById("crossfader-curve-slider").disabled = false;
     deckA.onOpen();
     deckB.onOpen();
     runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT);
@@ -1772,6 +2048,8 @@ function connect() {
     log("disconnected; retrying in 1s");
     document.getElementById("state-btn").disabled = true;
     document.getElementById("resync-btn").disabled = true;
+    document.getElementById("crossfader-slider").disabled = true;
+    document.getElementById("crossfader-curve-slider").disabled = true;
     deckA.onClose();
     deckB.onClose();
     stopPeriodicResync();
@@ -1792,6 +2070,7 @@ function connect() {
       case "state_snapshot":
         deckA.applySnapshot(msg.deck_a);
         deckB.applySnapshot(msg.deck_b);
+        applyCrossfaderSnapshot(msg);
         break;
       case "clock_response": {
         const t0Ms = pendingClockRequests.get(msg.request_id);
@@ -1814,6 +2093,9 @@ function connect() {
       case "pitch_lock_setting_changed":
         deckFor(msg).applyPitchLockSettingEvent(msg);
         break;
+      case "pfl_setting_changed":
+        deckFor(msg).applyPflSettingEvent(msg);
+        break;
       case "cue_point_changed":
         deckFor(msg).applyCuePointEvent(msg);
         break;
@@ -1825,6 +2107,12 @@ function connect() {
         break;
       case "loop_removed":
         deckFor(msg).applyLoopRemovedEvent(msg);
+        break;
+      case "crossfader_position_changed":
+        applyCrossfaderPositionEvent(msg);
+        break;
+      case "crossfader_curve_changed":
+        applyCrossfaderCurveEvent(msg);
         break;
       case "error":
         log(`server error [${msg.code}]${msg.request_id ? ` (request_id=${msg.request_id})` : ""}: ${msg.message}`);
@@ -1839,6 +2127,89 @@ document.getElementById("state-btn").addEventListener("click", () => {
   ws.send(JSON.stringify({ type: "state_request", request_id: `state-${randomId()}` }));
 });
 document.getElementById("resync-btn").addEventListener("click", () => runClockSyncBurst(INITIAL_SYNC_SAMPLE_COUNT));
+
+// ---- crossfader (room-wide synced) ----------------------------------------
+//
+// Same throttle-while-dragging-plus-forced-final-send shape as the tempo
+// slider's sendTempoSample, but without its interpolation-buffer/smoothed-
+// remote-rendering machinery - that exists to make a fast-moving remote
+// value look continuous frame-by-frame, which is worth it for audio that's
+// already playing in real time, but is more machinery than a crossfader UI
+// needs here: a remote client just snaps its slider to the latest value as
+// it arrives, and the existing OUTPUT_GAIN_RAMP_S ramp already keeps the
+// audible transition smooth regardless.
+const CROSSFADER_SAMPLE_INTERVAL_MS = 40;
+let lastCrossfaderPositionSentAtMs = -Infinity;
+let lastCrossfaderCurveSentAtMs = -Infinity;
+
+function sendCrossfaderPosition(position, force) {
+  const nowMs = performance.now();
+  if (!force && nowMs - lastCrossfaderPositionSentAtMs < CROSSFADER_SAMPLE_INTERVAL_MS) return;
+  lastCrossfaderPositionSentAtMs = nowMs;
+  ws.send(JSON.stringify({ type: "set_crossfader_position", request_id: `request-${randomId()}`, position }));
+}
+
+function sendCrossfaderCurve(shape, force) {
+  const nowMs = performance.now();
+  if (!force && nowMs - lastCrossfaderCurveSentAtMs < CROSSFADER_SAMPLE_INTERVAL_MS) return;
+  lastCrossfaderCurveSentAtMs = nowMs;
+  ws.send(JSON.stringify({ type: "set_crossfader_curve", request_id: `request-${randomId()}`, shape }));
+}
+
+{
+  const crossfaderSliderEl = document.getElementById("crossfader-slider");
+  crossfaderSliderEl.addEventListener("input", (e) => {
+    crossfaderPosition = parseFloat(e.target.value);
+    updateCrossfaderReadout();
+    deckA.applyOutputGain();
+    deckB.applyOutputGain();
+    sendCrossfaderPosition(crossfaderPosition, false);
+  });
+  crossfaderSliderEl.addEventListener("change", (e) => {
+    sendCrossfaderPosition(parseFloat(e.target.value), true); // forced final send on release, bypassing the throttle
+  });
+}
+
+{
+  const crossfaderCurveSliderEl = document.getElementById("crossfader-curve-slider");
+  // setupCrossfaderCurveCanvas already attached its own "input" listener on
+  // this element to redraw the canvas - this listener only handles the
+  // audio/sync side, independent of that one.
+  crossfaderCurveSliderEl.addEventListener("input", (e) => {
+    crossfaderCurveShape = parseFloat(e.target.value);
+    updateCrossfaderReadout();
+    deckA.applyOutputGain();
+    deckB.applyOutputGain();
+    sendCrossfaderCurve(crossfaderCurveShape, false);
+  });
+  crossfaderCurveSliderEl.addEventListener("change", (e) => {
+    sendCrossfaderCurve(parseFloat(e.target.value), true);
+  });
+}
+
+// Hardware role: purely local, never sent to the server - just re-gates
+// both decks' existing mix sends (see each deck's applyOutputGain). The
+// headphone-mix slider only means anything in headphone role, so it's
+// hidden otherwise rather than left visible-but-inert.
+const headphoneMixRowEl = document.getElementById("headphone-mix-row");
+for (const radio of document.querySelectorAll('input[name="hardware-role"]')) {
+  radio.addEventListener("change", (e) => {
+    if (!e.target.checked) return;
+    hardwareRole = e.target.value;
+    headphoneMixRowEl.hidden = hardwareRole !== "headphones";
+    log(`hardware role set to ${hardwareRole} (local only)`);
+    deckA.applyOutputGain();
+    deckB.applyOutputGain();
+  });
+}
+
+// Local only, like Hardware role itself - applies immediately on every
+// drag tick (no throttling needed; there's no network round-trip here).
+document.getElementById("headphone-mix-slider").addEventListener("input", (e) => {
+  headphoneMixT = parseFloat(e.target.value);
+  deckA.applyOutputGain();
+  deckB.applyOutputGain();
+});
 
 // ---- live position readout & drift smoothing ------------------------------
 

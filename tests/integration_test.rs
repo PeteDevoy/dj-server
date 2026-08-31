@@ -744,6 +744,56 @@ async fn pitch_lock_setting_syncs_to_both_clients_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn pfl_setting_syncs_to_both_clients_and_is_idempotent() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["deck_a"]["pfl_enabled"], false);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A enables it; both clients must converge on the same event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_pfl_enabled", "request_id": "req-pfl-on", "deck": "a", "enabled": true}),
+    )
+    .await;
+
+    let event_a = recv_until(&mut client_a, "pfl_setting_changed").await;
+    let event_b = recv_until(&mut client_b, "pfl_setting_changed").await;
+
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["enabled"], true);
+    assert_eq!(event_a["revision"], 1);
+    assert_eq!(event_a["request_id"], "req-pfl-on");
+
+    // A fresh snapshot must reflect the change.
+    send_json(
+        &mut client_b,
+        json!({"type": "state_request", "request_id": "state-after-pfl-on"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_b, "state_snapshot").await;
+    assert_eq!(snapshot["deck_a"]["pfl_enabled"], true);
+    assert_eq!(snapshot["deck_a"]["revision"], 1);
+
+    // Repeating the same value is idempotent: no new event, no revision bump.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_pfl_enabled", "request_id": "req-pfl-on-again", "deck": "a", "enabled": true}),
+    )
+    .await;
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-idempotent-pfl-toggle"}),
+    )
+    .await;
+    let snapshot_after = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_after["deck_a"]["revision"], 1);
+}
+
+#[tokio::test]
 async fn tempo_change_syncs_to_both_clients_and_carries_into_next_play() {
     let url = spawn_server().await;
     let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -841,4 +891,68 @@ async fn rapid_tempo_samples_each_get_a_distinct_ordered_broadcast() {
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot["deck_a"]["transport"]["playback_rate"], 1.05);
+}
+
+#[tokio::test]
+async fn crossfader_position_and_curve_sync_to_both_clients_and_share_a_revision() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut client_b, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let snapshot_a = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot_a["crossfader_position"], 0.5);
+    assert_eq!(snapshot_a["crossfader_curve_shape"], 0.5);
+    assert_eq!(snapshot_a["crossfader_revision"], 0);
+    let _ = recv_until(&mut client_b, "state_snapshot").await;
+
+    // Client A drags the crossfader; both clients must converge on the same event.
+    send_json(
+        &mut client_a,
+        json!({"type": "set_crossfader_position", "request_id": "req-xfade-pos", "position": 0.2}),
+    )
+    .await;
+    let event_a = recv_until(&mut client_a, "crossfader_position_changed").await;
+    let event_b = recv_until(&mut client_b, "crossfader_position_changed").await;
+    assert_eq!(event_a["event_id"], event_b["event_id"]);
+    assert_eq!(event_a["position"], 0.2);
+    assert_eq!(event_a["revision"], 1);
+
+    // Client B changes the curve shape; the revision keeps counting up from
+    // the position change above - one shared counter for both.
+    send_json(
+        &mut client_b,
+        json!({"type": "set_crossfader_curve", "request_id": "req-xfade-curve", "shape": 0.9}),
+    )
+    .await;
+    let curve_a = recv_until(&mut client_a, "crossfader_curve_changed").await;
+    let curve_b = recv_until(&mut client_b, "crossfader_curve_changed").await;
+    assert_eq!(curve_a["event_id"], curve_b["event_id"]);
+    assert_eq!(curve_a["shape"], 0.9);
+    assert_eq!(curve_a["revision"], 2);
+
+    // A fresh snapshot must reflect both changes.
+    send_json(
+        &mut client_a,
+        json!({"type": "state_request", "request_id": "state-after-crossfader-changes"}),
+    )
+    .await;
+    let snapshot = recv_until(&mut client_a, "state_snapshot").await;
+    assert_eq!(snapshot["crossfader_position"], 0.2);
+    assert_eq!(snapshot["crossfader_curve_shape"], 0.9);
+    assert_eq!(snapshot["crossfader_revision"], 2);
+}
+
+#[tokio::test]
+async fn crossfader_position_outside_bounds_is_rejected() {
+    let url = spawn_server().await;
+    let (mut client_a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _ = recv_until(&mut client_a, "state_snapshot").await;
+
+    send_json(
+        &mut client_a,
+        json!({"type": "set_crossfader_position", "request_id": "req-xfade-bad", "position": 1.5}),
+    )
+    .await;
+    let error = recv_until(&mut client_a, "error").await;
+    assert_eq!(error["code"], "invalid_message");
 }
