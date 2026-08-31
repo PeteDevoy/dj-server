@@ -108,9 +108,9 @@ pub struct DeckState {
     /// shared-revision convention as nudge_enabled.
     pub pitch_lock_enabled: bool,
     /// The room's single cue point, or `None` if nothing's been set yet.
-    /// Same shared-revision convention as the settings above. There is
-    /// deliberately no way to clear it back to `None` once set - only to
-    /// overwrite it with a new position (see `set_cue_point`).
+    /// Same shared-revision convention as the settings above. `set_cue_point`
+    /// overwrites it with a new position; `remove_cue_point` clears it back
+    /// to `None` entirely (e.g. when a fresh track is loaded).
     pub cue_point_us: Option<u64>,
     /// The room's single loop region, or `None` if none has been inserted
     /// yet. Same shared-revision convention as the settings above.
@@ -236,6 +236,15 @@ impl DeckState {
             position_us,
             revision: self.revision,
         }
+    }
+
+    /// Clears the cue point entirely, unlike `set_cue_point` which only ever
+    /// overwrites it with a new position. Returns `None` if there was no cue
+    /// point to clear, mirroring `remove_loop`'s no-op-if-absent convention.
+    pub fn remove_cue_point(&mut self) -> Option<u64> {
+        self.cue_point_us.take()?;
+        self.revision += 1;
+        Some(self.revision)
     }
 
     /// Inserts/overwrites the room's single loop region, always active, and
@@ -721,6 +730,25 @@ mod tests {
 
         room.set_cue_point(9_000_000);
         assert_eq!(room.cue_point_us, Some(9_000_000));
+    }
+
+    #[test]
+    fn remove_cue_point_clears_an_existing_cue_point() {
+        let mut room = DeckState::new();
+        room.set_cue_point(6_000_000);
+        let revision_before = room.revision;
+
+        let revision = room.remove_cue_point().expect("cue point exists");
+
+        assert_eq!(room.cue_point_us, None);
+        assert_eq!(revision, revision_before + 1);
+        assert_eq!(room.revision, revision_before + 1);
+    }
+
+    #[test]
+    fn remove_cue_point_with_none_set_returns_none() {
+        let mut room = DeckState::new();
+        assert_eq!(room.remove_cue_point(), None);
     }
 
     #[test]

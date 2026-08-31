@@ -19,12 +19,18 @@
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
   .waveform { margin: 0.5rem 0 1rem; cursor: pointer; }
   .decks { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
-  .deck { flex: 1 1 480px; min-width: 380px; }
+  .deck { flex: 1 1 480px; min-width: 380px; transition: outline-color 0.1s, background-color 0.1s; outline: 2px dashed transparent; outline-offset: -2px; }
+  .deck.drag-over { outline-color: #3b82f6; background: #3b82f622; }
+  .deck.drag-rejected { outline-color: #a22; background: #a2222222; cursor: not-allowed; }
   .deck h3 { font-size: 0.95rem; margin: 1rem 0 0.25rem; }
   .deck h3:first-of-type { margin-top: 0; }
   .deck-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .deck-header h2 { margin: 0; }
   .file-controls { color: #8888; font-size: 0.9rem; }
+  .decoding { animation: pulse 1.2s ease-in-out infinite; }
+  .flash-reject { animation: flash-reject 2s ease-in-out; }
+  @keyframes flash-reject { 0%, 100% { color: inherit; } 15%, 45%, 75% { color: #c0392b; } 30%, 60%, 90% { color: inherit; } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   .measurements summary { cursor: pointer; font-size: 0.95rem; margin: 1rem 0 0.25rem; }
   .measurements[open] summary { margin-bottom: 0.5rem; }
 </style>
@@ -33,7 +39,7 @@
 <h1>Multi-client DJ Server<sup class="alpha-badge">PRE-ALPHA</sup></h1>
 
 <div class="decks">
-<section class="deck">
+<section class="deck" id="deck-section-a">
   <div class="deck-header">
     <h2>Deck A</h2>
     <span class="file-controls">
@@ -115,7 +121,7 @@
   </details>
 </section>
 
-<section class="deck">
+<section class="deck" id="deck-section-b">
   <div class="deck-header">
     <h2>Deck B</h2>
     <span class="file-controls">
@@ -1253,6 +1259,18 @@ function createDeck(deckId) {
     log(`cue_point_changed (revision ${msg.revision}): position ${msg.position_us}us`);
   }
 
+  function applyCuePointRemovedEvent(msg) {
+    if (msg.revision <= lastAppliedRevision) {
+      log(`ignoring stale/duplicate cue_point_removed (revision ${msg.revision} <= ${lastAppliedRevision})`);
+      return;
+    }
+    lastAppliedRevision = msg.revision;
+    cuePointUs = null;
+    window.renderRegions?.(deckId, { cuePointUs, loopRegion });
+    updateCueButtonUi();
+    log(`cue_point_removed (revision ${msg.revision})`);
+  }
+
   function applyLoopChangedEvent(msg) {
     if (msg.revision <= lastAppliedRevision) {
       log(`ignoring stale/duplicate loop_changed (revision ${msg.revision} <= ${lastAppliedRevision})`);
@@ -1423,10 +1441,11 @@ function createDeck(deckId) {
 
   // ---- UI wiring --------------------------------------------------------
 
-  el("file-input").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  /// Decodes and loads `file` as this deck's audio, shared by both the file
+  /// input's "change" event and dropping a file onto the deck area.
+  async function loadAudioFile(file) {
     el("file-status").textContent = "decoding...";
+    el("file-status").classList.add("decoding");
     try {
       const arrayBuffer = await file.arrayBuffer();
       const ctx = ensureAudioContext();
@@ -1434,17 +1453,102 @@ function createDeck(deckId) {
       await ensurePitchWorkletLoaded(ctx);
       audioBuffer = await ctx.decodeAudioData(arrayBuffer);
       el("file-status").textContent = `${file.name} (${audioBuffer.duration.toFixed(1)}s)`;
+      el("file-status").classList.remove("decoding");
       log(`loaded audio file: ${file.name}, duration ${audioBuffer.duration.toFixed(3)}s`);
       window.waveSurfers?.[deckId]?.loadBlob(file);
       startBpmDetection(audioBuffer); // deliberately not awaited - runs in the background, must not block playback
+
+      // A fresh track means none of the previous track's cue point, loop, or
+      // playhead position mean anything anymore - reset this deck's
+      // room-wide state so every connected client starts from the same
+      // clean slate. Each is its own request (matching every other
+      // single-purpose action here), so each is a no-op broadcast-free
+      // no-op when there's nothing to clear (see remove_cue_point/
+      // remove_loop's no-op-if-absent convention) rather than forcing a
+      // revision bump for no reason. "restart" resets the playhead to 0
+      // without changing whether the deck is playing or paused.
+      ws.send(JSON.stringify({ type: "remove_cue_point", request_id: `request-${randomId()}`, deck: deckId }));
+      ws.send(JSON.stringify({ type: "remove_loop", request_id: `request-${randomId()}`, deck: deckId }));
+      ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action: "restart" }));
     } catch (err) {
       audioBuffer = null;
       el("file-status").textContent = `failed to load "${file.name}": ${err.message ?? err}`;
+      el("file-status").classList.remove("decoding");
       log(`failed to decode audio file "${file.name}": ${err.message ?? err}`);
     }
+  }
+
+  el("file-input").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    loadAudioFile(file);
   });
 
-  el("play-pause-btn").addEventListener("click", () => {
+  // Drag-and-drop: the whole deck area is the drop target, not just the file
+  // input, so a track can be dropped anywhere on Deck A/B's panel. Blocked
+  // while playing - swapping the buffer out from under an already-sounding
+  // source is exactly the kind of surprise a DJ mixer shouldn't spring, and
+  // there's no obvious "when should the new track start" answer while the
+  // deck is live.
+  //
+  // dragenter/dragover ALWAYS call preventDefault(), even while rejecting -
+  // an element that never claims itself as a valid drop target gets treated
+  // by the browser as "not a drop target at all", and dropping a file there
+  // falls through to the browser's OWN default action for a dropped file:
+  // navigating the tab (or opening a new one) to it. So "reject" here means
+  // "accept the drop, then no-op" (see the `drop` handler below) rather than
+  // "don't claim the drop" - the same accept-then-noop shape as everywhere
+  // else the room rejects a request (e.g. remove_loop with no loop). The
+  // "drag-rejected" CSS class (red tint, cursor: not-allowed) is what
+  // communicates "this won't work" instead of the browser's native cursor.
+  {
+    const deckSectionEl = el("deck-section");
+    let dragDepth = 0; // dragenter/dragleave can nest (fire for child elements too); only clear the highlight once fully left
+
+    deckSectionEl.addEventListener("dragenter", (e) => {
+      e.preventDefault();
+      dragDepth++;
+      deckSectionEl.classList.add(transport.playing ? "drag-rejected" : "drag-over");
+    });
+    deckSectionEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+    });
+    deckSectionEl.addEventListener("dragleave", () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) deckSectionEl.classList.remove("drag-over", "drag-rejected");
+    });
+    deckSectionEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dragDepth = 0;
+      deckSectionEl.classList.remove("drag-over", "drag-rejected");
+      if (transport.playing) {
+        log("ignored dropped file: deck is playing");
+        flashRejectPlayPauseButton();
+        return;
+      }
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+      loadAudioFile(file);
+    });
+  }
+
+  /// Flashes the Play/Pause button's text red for ~2s - the visible "why
+  /// was my drop ignored" cue, pointing at the control that would need to
+  /// change (pause) before a drop is accepted. Restarts cleanly even if
+  /// called again mid-flash (e.g. two rejected drops in quick succession):
+  /// removing the class and forcing a reflow before re-adding it is what
+  /// makes the CSS animation replay instead of being a no-op re-add.
+  const playPauseBtnEl = el("play-pause-btn");
+  playPauseBtnEl.addEventListener("animationend", (e) => {
+    if (e.animationName === "flash-reject") playPauseBtnEl.classList.remove("flash-reject");
+  });
+  function flashRejectPlayPauseButton() {
+    playPauseBtnEl.classList.remove("flash-reject");
+    void playPauseBtnEl.offsetWidth; // force reflow so a restart mid-flash actually replays the animation
+    playPauseBtnEl.classList.add("flash-reject");
+  }
+
+  playPauseBtnEl.addEventListener("click", () => {
     const action = transport.playing ? "pause" : "play";
     ws.send(JSON.stringify({ type: "transport_request", request_id: `request-${randomId()}`, deck: deckId, action }));
   });
@@ -1619,6 +1723,7 @@ function createDeck(deckId) {
     applyBassCutSettingEvent,
     applyPitchLockSettingEvent,
     applyCuePointEvent,
+    applyCuePointRemovedEvent,
     applyLoopChangedEvent,
     applyLoopRemovedEvent,
     applyTempoSample,
@@ -1712,6 +1817,9 @@ function connect() {
       case "cue_point_changed":
         deckFor(msg).applyCuePointEvent(msg);
         break;
+      case "cue_point_removed":
+        deckFor(msg).applyCuePointRemovedEvent(msg);
+        break;
       case "loop_changed":
         deckFor(msg).applyLoopChangedEvent(msg);
         break;
@@ -1763,6 +1871,16 @@ function armDriftCalibrationProbeOnFirstInteraction() {
   window.addEventListener("keydown", trigger, { once: true });
 }
 armDriftCalibrationProbeOnFirstInteraction();
+
+// Safety net for a file dropped outside either deck's own drop target (a
+// margin, the Connection/Log sections, ...): without this, the browser's
+// default action for an unclaimed file drop is to navigate the tab (or open
+// a new one) to it. Each deck's own dragenter/dragover handlers already
+// preventDefault() within their own area; this just extends the same "never
+// let a stray drop fall through to browser navigation" guarantee to the
+// rest of the page.
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
 
 connect();
 </script>

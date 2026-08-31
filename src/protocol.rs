@@ -136,6 +136,14 @@ pub enum ClientMessage {
         deck: DeckId,
         position_us: u64,
     },
+    /// Clears a deck's cue point entirely (back to "never set") - e.g. when
+    /// a fresh track is loaded onto that deck, so a leftover cue point from
+    /// the previous track can't linger. A no-op if that deck has no cue
+    /// point.
+    RemoveCuePoint {
+        request_id: String,
+        deck: DeckId,
+    },
     /// Inserts/overwrites a deck's single loop region, always active, at an
     /// arbitrary [start_us, end_us) - e.g. pressing Loop with no active loop
     /// at the playhead. Synced room-wide like `SetCuePoint`.
@@ -175,6 +183,7 @@ impl ClientMessage {
             ClientMessage::SetPitchLockEnabled { request_id, .. } => request_id,
             ClientMessage::SeekRequest { request_id, .. } => request_id,
             ClientMessage::SetCuePoint { request_id, .. } => request_id,
+            ClientMessage::RemoveCuePoint { request_id, .. } => request_id,
             ClientMessage::SetLoop { request_id, .. } => request_id,
             ClientMessage::SetLoopActive { request_id, .. } => request_id,
             ClientMessage::RemoveLoop { request_id, .. } => request_id,
@@ -272,6 +281,17 @@ pub enum ServerMessage {
         deck: DeckId,
         revision: u64,
         position_us: u64,
+    },
+    /// Broadcast whenever a deck's cue point is cleared entirely (see
+    /// `ClientMessage::RemoveCuePoint`) - unlike `CuePointChanged`, this
+    /// describes an absence, so it carries no position_us field. Shares
+    /// that deck's revision counter, like `CuePointChanged`.
+    CuePointRemoved {
+        event_id: Uuid,
+        request_id: String,
+        origin_connection_id: Uuid,
+        deck: DeckId,
+        revision: u64,
     },
     /// Broadcast whenever a deck's single loop region is inserted,
     /// overwritten, or toggled active/inactive (see `ClientMessage::SetLoop`
@@ -475,6 +495,34 @@ mod tests {
         assert_eq!(json["end_us"], 13_500_000);
         assert_eq!(json["active"], true);
         assert_eq!(json["revision"], 4);
+    }
+
+    #[test]
+    fn deserializes_remove_cue_point() {
+        let json = r#"{"type":"remove_cue_point","request_id":"request-109","deck":"a"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::RemoveCuePoint { request_id, deck } => {
+                assert_eq!(request_id, "request-109");
+                assert_eq!(deck, DeckId::A);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn serializes_cue_point_removed() {
+        let msg = ServerMessage::CuePointRemoved {
+            event_id: Uuid::nil(),
+            request_id: "request-109".to_string(),
+            origin_connection_id: Uuid::nil(),
+            deck: DeckId::A,
+            revision: 8,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "cue_point_removed");
+        assert_eq!(json["deck"], "a");
+        assert_eq!(json["revision"], 8);
     }
 
     #[test]

@@ -267,6 +267,9 @@ async fn handle_client_message(
         ClientMessage::SetCuePoint { request_id, deck, position_us } => {
             handle_set_cue_point(request_id, deck, position_us, state, connection_id).await;
         }
+        ClientMessage::RemoveCuePoint { request_id, deck } => {
+            handle_remove_cue_point(request_id, deck, state, connection_id).await;
+        }
         ClientMessage::SetLoop { request_id, deck, start_us, end_us } => {
             handle_set_loop(request_id, deck, start_us, end_us, state, connection_id).await;
         }
@@ -561,6 +564,48 @@ async fn handle_set_cue_point(
         deck,
         revision: event_data.revision,
         position_us: event_data.position_us,
+    };
+
+    let _ = state.events.send(event);
+}
+
+async fn handle_remove_cue_point(request_id: String, deck: DeckId, state: &Arc<AppState>, connection_id: Uuid) {
+    {
+        let mut seen = state.seen_requests.lock().await;
+        if seen.check_and_record(&request_id) {
+            debug!(%request_id, %connection_id, "duplicate remove_cue_point request ignored");
+            return;
+        }
+    }
+
+    let revision = {
+        let mut room = state.room.lock().await;
+        room.deck_mut(deck).remove_cue_point()
+    };
+
+    let Some(revision) = revision else {
+        debug!(%request_id, %connection_id, ?deck, "remove_cue_point ignored: no cue point exists yet");
+        return;
+    };
+
+    let event_id = Uuid::new_v4();
+    let connected_client_count = state.connection_count.load(Ordering::SeqCst);
+    info!(
+        %event_id,
+        request_id = %request_id,
+        %connection_id,
+        ?deck,
+        revision,
+        connected_client_count,
+        "cue point removed"
+    );
+
+    let event = ServerMessage::CuePointRemoved {
+        event_id,
+        request_id,
+        origin_connection_id: connection_id,
+        deck,
+        revision,
     };
 
     let _ = state.events.send(event);
