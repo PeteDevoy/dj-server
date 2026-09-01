@@ -1367,15 +1367,24 @@ function createDeck(deckId) {
         ? driftCalibrationOffsetUs / 1e6
         : 0;
 
+      // Both branches below clamp their computed start time to 0:
+      // knownCalibrationOffsetS can be a large *negative* number (this
+      // browser's audio tends to start audibly late, so the correction
+      // shifts scheduling earlier to compensate), and early in a session -
+      // before the AudioContext has accumulated that much currentTime to
+      // absorb it - adding it can land below zero. AudioBufferSourceNode.
+      // start() throws a RangeError for a negative "when", and 0 already
+      // means "as soon as possible" per spec, so clamping is a free,
+      // correct fallback rather than a workaround.
       if (lateByUs > 0) {
         const latePositionUs = Math.max(0, positionUs + lateByUs);
-        const startedAtContextTime = ctx.currentTime + knownCalibrationOffsetS;
+        const startedAtContextTime = Math.max(0, ctx.currentTime + knownCalibrationOffsetS);
         log(`late ${action} event by ${Math.round(lateByUs)}us; starting immediately at ${(latePositionUs / 1e6).toFixed(3)}s`);
         source.start(startedAtContextTime, latePositionUs / 1e6);
         currentSourceStart = { contextTime: startedAtContextTime, positionUs: latePositionUs };
         measureFire();
       } else {
-        const startAt = performanceMsToAudioContextTime(targetLocalMs) + knownCalibrationOffsetS;
+        const startAt = Math.max(0, performanceMsToAudioContextTime(targetLocalMs) + knownCalibrationOffsetS);
         source.start(startAt, positionUs / 1e6);
         currentSourceStart = { contextTime: startAt, positionUs };
         setTimeout(measureFire, Math.max(0, targetLocalMs - performance.now()));
