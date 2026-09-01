@@ -77,7 +77,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         for value in ["1", "true", "TRUE", "yes"] {
             std::env::set_var("TLS_ENABLED", value);
-            assert!(Config::from_env().tls_enabled, "expected {value:?} to enable TLS");
+            assert!(
+                Config::from_env().tls_enabled,
+                "expected {value:?} to enable TLS"
+            );
         }
         std::env::remove_var("TLS_ENABLED");
     }

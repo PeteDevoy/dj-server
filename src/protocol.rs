@@ -229,14 +229,19 @@ impl ClientMessage {
         if let ClientMessage::SetTempoRequest { playback_rate, .. } = self {
             // A small epsilon guards against a slider's floating-point steps
             // landing a hair outside the nominal bound.
-            if *playback_rate < MIN_PLAYBACK_RATE - 1e-9 || *playback_rate > MAX_PLAYBACK_RATE + 1e-9 {
+            if *playback_rate < MIN_PLAYBACK_RATE - 1e-9
+                || *playback_rate > MAX_PLAYBACK_RATE + 1e-9
+            {
                 return Err(format!(
                     "playback_rate must be between {MIN_PLAYBACK_RATE} and {MAX_PLAYBACK_RATE}"
                 ));
             }
         }
 
-        if let ClientMessage::SetLoop { start_us, end_us, .. } = self {
+        if let ClientMessage::SetLoop {
+            start_us, end_us, ..
+        } = self
+        {
             if end_us <= start_us {
                 return Err("end_us must be greater than start_us".to_string());
             }
@@ -404,7 +409,8 @@ mod tests {
 
     #[test]
     fn deserializes_clock_request() {
-        let json = r#"{"type":"clock_request","request_id":"clock-42","client_send_time_ms":9382.45}"#;
+        let json =
+            r#"{"type":"clock_request","request_id":"clock-42","client_send_time_ms":9382.45}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
             ClientMessage::ClockRequest {
@@ -420,10 +426,15 @@ mod tests {
 
     #[test]
     fn deserializes_transport_request() {
-        let json = r#"{"type":"transport_request","request_id":"request-91","deck":"a","action":"play"}"#;
+        let json =
+            r#"{"type":"transport_request","request_id":"request-91","deck":"a","action":"play"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::TransportRequest { request_id, deck, action } => {
+            ClientMessage::TransportRequest {
+                request_id,
+                deck,
+                action,
+            } => {
                 assert_eq!(request_id, "request-91");
                 assert_eq!(deck, DeckId::A);
                 assert_eq!(action, TransportAction::Play);
@@ -434,7 +445,8 @@ mod tests {
 
     #[test]
     fn deserializes_transport_request_for_deck_b() {
-        let json = r#"{"type":"transport_request","request_id":"request-91b","deck":"b","action":"play"}"#;
+        let json =
+            r#"{"type":"transport_request","request_id":"request-91b","deck":"b","action":"play"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
             ClientMessage::TransportRequest { deck, .. } => assert_eq!(deck, DeckId::B),
@@ -447,7 +459,9 @@ mod tests {
         let json = r#"{"type":"transport_request","request_id":"request-94","deck":"a","action":"restart"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::TransportRequest { request_id, action, .. } => {
+            ClientMessage::TransportRequest {
+                request_id, action, ..
+            } => {
                 assert_eq!(request_id, "request-94");
                 assert_eq!(action, TransportAction::Restart);
             }
@@ -460,7 +474,11 @@ mod tests {
         let json = r#"{"type":"seek_request","request_id":"request-101","deck":"a","position_us":4500000}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SeekRequest { request_id, position_us, .. } => {
+            ClientMessage::SeekRequest {
+                request_id,
+                position_us,
+                ..
+            } => {
                 assert_eq!(request_id, "request-101");
                 assert_eq!(position_us, 4_500_000);
             }
@@ -473,7 +491,11 @@ mod tests {
         let json = r#"{"type":"set_cue_point","request_id":"request-104","deck":"a","position_us":6000000}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetCuePoint { request_id, position_us, .. } => {
+            ClientMessage::SetCuePoint {
+                request_id,
+                position_us,
+                ..
+            } => {
                 assert_eq!(request_id, "request-104");
                 assert_eq!(position_us, 6_000_000);
             }
@@ -500,11 +522,15 @@ mod tests {
 
     #[test]
     fn deserializes_set_loop() {
-        let json =
-            r#"{"type":"set_loop","request_id":"request-106","deck":"a","start_us":6000000,"end_us":13500000}"#;
+        let json = r#"{"type":"set_loop","request_id":"request-106","deck":"a","start_us":6000000,"end_us":13500000}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetLoop { request_id, start_us, end_us, .. } => {
+            ClientMessage::SetLoop {
+                request_id,
+                start_us,
+                end_us,
+                ..
+            } => {
                 assert_eq!(request_id, "request-106");
                 assert_eq!(start_us, 6_000_000);
                 assert_eq!(end_us, 13_500_000);
@@ -537,10 +563,13 @@ mod tests {
 
     #[test]
     fn deserializes_set_loop_active() {
-        let json = r#"{"type":"set_loop_active","request_id":"request-107","deck":"a","active":false}"#;
+        let json =
+            r#"{"type":"set_loop_active","request_id":"request-107","deck":"a","active":false}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetLoopActive { request_id, active, .. } => {
+            ClientMessage::SetLoopActive {
+                request_id, active, ..
+            } => {
                 assert_eq!(request_id, "request-107");
                 assert!(!active);
             }
@@ -630,7 +659,9 @@ mod tests {
         let json = r#"{"type":"transport_request","request_id":"request-105","deck":"a","action":"cue_release"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::TransportRequest { request_id, action, .. } => {
+            ClientMessage::TransportRequest {
+                request_id, action, ..
+            } => {
                 assert_eq!(request_id, "request-105");
                 assert_eq!(action, TransportAction::CueRelease);
             }
@@ -754,7 +785,11 @@ mod tests {
             pitch_lock_enabled: true,
             pfl_enabled: false,
             cue_point_us: Some(6_000_000),
-            loop_region: Some(LoopRegionDto { start_us: 6_000_000, end_us: 10_000_000, active: true }),
+            loop_region: Some(LoopRegionDto {
+                start_us: 6_000_000,
+                end_us: 10_000_000,
+                active: true,
+            }),
         };
         let msg = ServerMessage::StateSnapshot {
             server_time_us: 48_111_492,
@@ -797,10 +832,14 @@ mod tests {
 
     #[test]
     fn deserializes_set_crossfader_position() {
-        let json = r#"{"type":"set_crossfader_position","request_id":"request-110","position":0.25}"#;
+        let json =
+            r#"{"type":"set_crossfader_position","request_id":"request-110","position":0.25}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetCrossfaderPosition { request_id, position } => {
+            ClientMessage::SetCrossfaderPosition {
+                request_id,
+                position,
+            } => {
                 assert_eq!(request_id, "request-110");
                 assert_eq!(position, 0.25);
             }
@@ -882,10 +921,15 @@ mod tests {
 
     #[test]
     fn deserializes_set_nudge_enabled() {
-        let json = r#"{"type":"set_nudge_enabled","request_id":"request-95","deck":"a","enabled":false}"#;
+        let json =
+            r#"{"type":"set_nudge_enabled","request_id":"request-95","deck":"a","enabled":false}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetNudgeEnabled { request_id, enabled, .. } => {
+            ClientMessage::SetNudgeEnabled {
+                request_id,
+                enabled,
+                ..
+            } => {
                 assert_eq!(request_id, "request-95");
                 assert!(!enabled);
             }
@@ -898,7 +942,11 @@ mod tests {
         let json = r#"{"type":"set_tempo_request","request_id":"request-96","deck":"a","playback_rate":1.03}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetTempoRequest { request_id, playback_rate, .. } => {
+            ClientMessage::SetTempoRequest {
+                request_id,
+                playback_rate,
+                ..
+            } => {
                 assert_eq!(request_id, "request-96");
                 assert_eq!(playback_rate, 1.03);
             }
@@ -923,11 +971,13 @@ mod tests {
 
     #[test]
     fn rejects_playback_rate_outside_bounds() {
-        let json = r#"{"type":"set_tempo_request","request_id":"r","deck":"a","playback_rate":1.5}"#;
+        let json =
+            r#"{"type":"set_tempo_request","request_id":"r","deck":"a","playback_rate":1.5}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         assert!(msg.validate().is_err());
 
-        let json = r#"{"type":"set_tempo_request","request_id":"r","deck":"a","playback_rate":0.5}"#;
+        let json =
+            r#"{"type":"set_tempo_request","request_id":"r","deck":"a","playback_rate":0.5}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         assert!(msg.validate().is_err());
     }
@@ -937,7 +987,11 @@ mod tests {
         let json = r#"{"type":"set_bass_cut_enabled","request_id":"request-97","deck":"a","enabled":true}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetBassCutEnabled { request_id, enabled, .. } => {
+            ClientMessage::SetBassCutEnabled {
+                request_id,
+                enabled,
+                ..
+            } => {
                 assert_eq!(request_id, "request-97");
                 assert!(enabled);
             }
@@ -966,7 +1020,11 @@ mod tests {
         let json = r#"{"type":"set_pitch_lock_enabled","request_id":"request-98","deck":"a","enabled":false}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetPitchLockEnabled { request_id, enabled, .. } => {
+            ClientMessage::SetPitchLockEnabled {
+                request_id,
+                enabled,
+                ..
+            } => {
                 assert_eq!(request_id, "request-98");
                 assert!(!enabled);
             }
@@ -992,10 +1050,15 @@ mod tests {
 
     #[test]
     fn deserializes_set_pfl_enabled() {
-        let json = r#"{"type":"set_pfl_enabled","request_id":"request-99","deck":"a","enabled":true}"#;
+        let json =
+            r#"{"type":"set_pfl_enabled","request_id":"request-99","deck":"a","enabled":true}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::SetPflEnabled { request_id, enabled, .. } => {
+            ClientMessage::SetPflEnabled {
+                request_id,
+                enabled,
+                ..
+            } => {
                 assert_eq!(request_id, "request-99");
                 assert!(enabled);
             }

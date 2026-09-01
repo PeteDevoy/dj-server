@@ -143,7 +143,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     info!(%connection_id, connected_client_count = connected, "client disconnected");
 }
 
-async fn send(sink: &mut (impl futures::Sink<Message> + Unpin), msg: &ServerMessage) -> Result<(), ()> {
+async fn send(
+    sink: &mut (impl futures::Sink<Message> + Unpin),
+    msg: &ServerMessage,
+) -> Result<(), ()> {
     let text = match serde_json::to_string(msg) {
         Ok(text) => text,
         Err(err) => {
@@ -179,9 +182,11 @@ fn deck_state_dto(deck: &DeckState) -> DeckStateDto {
         pitch_lock_enabled: deck.pitch_lock_enabled,
         pfl_enabled: deck.pfl_enabled,
         cue_point_us: deck.cue_point_us,
-        loop_region: deck
-            .loop_region
-            .map(|l| LoopRegionDto { start_us: l.start_us, end_us: l.end_us, active: l.active }),
+        loop_region: deck.loop_region.map(|l| LoopRegionDto {
+            start_us: l.start_us,
+            end_us: l.end_us,
+            active: l.active,
+        }),
     }
 }
 
@@ -250,43 +255,88 @@ async fn handle_client_message(
             let snapshot = build_snapshot(state).await;
             let _ = outbound_tx.send(snapshot).await;
         }
-        ClientMessage::TransportRequest { request_id, deck, action } => {
-            handle_transport_request(request_id, deck, action, state, connection_id, outbound_tx).await;
+        ClientMessage::TransportRequest {
+            request_id,
+            deck,
+            action,
+        } => {
+            handle_transport_request(request_id, deck, action, state, connection_id, outbound_tx)
+                .await;
         }
-        ClientMessage::SetNudgeEnabled { request_id, deck, enabled } => {
+        ClientMessage::SetNudgeEnabled {
+            request_id,
+            deck,
+            enabled,
+        } => {
             handle_set_nudge_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SetTempoRequest { request_id, deck, playback_rate } => {
+        ClientMessage::SetTempoRequest {
+            request_id,
+            deck,
+            playback_rate,
+        } => {
             handle_set_tempo_request(request_id, deck, playback_rate, state, connection_id).await;
         }
-        ClientMessage::SetBassCutEnabled { request_id, deck, enabled } => {
+        ClientMessage::SetBassCutEnabled {
+            request_id,
+            deck,
+            enabled,
+        } => {
             handle_set_bass_cut_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SetPitchLockEnabled { request_id, deck, enabled } => {
+        ClientMessage::SetPitchLockEnabled {
+            request_id,
+            deck,
+            enabled,
+        } => {
             handle_set_pitch_lock_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SetPflEnabled { request_id, deck, enabled } => {
+        ClientMessage::SetPflEnabled {
+            request_id,
+            deck,
+            enabled,
+        } => {
             handle_set_pfl_enabled(request_id, deck, enabled, state, connection_id).await;
         }
-        ClientMessage::SeekRequest { request_id, deck, position_us } => {
+        ClientMessage::SeekRequest {
+            request_id,
+            deck,
+            position_us,
+        } => {
             handle_seek_request(request_id, deck, position_us, state, connection_id).await;
         }
-        ClientMessage::SetCuePoint { request_id, deck, position_us } => {
+        ClientMessage::SetCuePoint {
+            request_id,
+            deck,
+            position_us,
+        } => {
             handle_set_cue_point(request_id, deck, position_us, state, connection_id).await;
         }
         ClientMessage::RemoveCuePoint { request_id, deck } => {
             handle_remove_cue_point(request_id, deck, state, connection_id).await;
         }
-        ClientMessage::SetLoop { request_id, deck, start_us, end_us } => {
+        ClientMessage::SetLoop {
+            request_id,
+            deck,
+            start_us,
+            end_us,
+        } => {
             handle_set_loop(request_id, deck, start_us, end_us, state, connection_id).await;
         }
-        ClientMessage::SetLoopActive { request_id, deck, active } => {
+        ClientMessage::SetLoopActive {
+            request_id,
+            deck,
+            active,
+        } => {
             handle_set_loop_active(request_id, deck, active, state, connection_id).await;
         }
         ClientMessage::RemoveLoop { request_id, deck } => {
             handle_remove_loop(request_id, deck, state, connection_id).await;
         }
-        ClientMessage::SetCrossfaderPosition { request_id, position } => {
+        ClientMessage::SetCrossfaderPosition {
+            request_id,
+            position,
+        } => {
             handle_set_crossfader_position(request_id, position, state, connection_id).await;
         }
         ClientMessage::SetCrossfaderCurve { request_id, shape } => {
@@ -325,9 +375,8 @@ async fn handle_transport_request(
             crate::protocol::TransportAction::Restart => {
                 deck_state.schedule_restart(received_server_time_us, state.schedule_lead_time_us)
             }
-            crate::protocol::TransportAction::CueRelease => {
-                deck_state.schedule_cue_release(received_server_time_us, state.schedule_lead_time_us)
-            }
+            crate::protocol::TransportAction::CueRelease => deck_state
+                .schedule_cue_release(received_server_time_us, state.schedule_lead_time_us),
             crate::protocol::TransportAction::SetTempo => {
                 drop(room);
                 let _ = outbound_tx
@@ -346,7 +395,9 @@ async fn handle_transport_request(
                     .send(ServerMessage::Error {
                         request_id: Some(request_id.clone()),
                         code: "invalid_message".to_string(),
-                        message: "seek is not valid for transport_request; use seek_request instead".to_string(),
+                        message:
+                            "seek is not valid for transport_request; use seek_request instead"
+                                .to_string(),
                     })
                     .await;
                 return;
@@ -450,8 +501,11 @@ async fn handle_set_tempo_request(
     let received_server_time_us = state.clock.now_us();
     let event_data = {
         let mut room = state.room.lock().await;
-        room.deck_mut(deck)
-            .schedule_playback_rate(received_server_time_us, TEMPO_SAMPLE_LEAD_TIME_US, playback_rate)
+        room.deck_mut(deck).schedule_playback_rate(
+            received_server_time_us,
+            TEMPO_SAMPLE_LEAD_TIME_US,
+            playback_rate,
+        )
     };
 
     let event_id = Uuid::new_v4();
@@ -503,8 +557,11 @@ async fn handle_seek_request(
     let received_server_time_us = state.clock.now_us();
     let event_data = {
         let mut room = state.room.lock().await;
-        room.deck_mut(deck)
-            .schedule_seek(received_server_time_us, state.schedule_lead_time_us, position_us)
+        room.deck_mut(deck).schedule_seek(
+            received_server_time_us,
+            state.schedule_lead_time_us,
+            position_us,
+        )
     };
 
     let event_id = Uuid::new_v4();
@@ -582,7 +639,12 @@ async fn handle_set_cue_point(
     let _ = state.events.send(event);
 }
 
-async fn handle_remove_cue_point(request_id: String, deck: DeckId, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_remove_cue_point(
+    request_id: String,
+    deck: DeckId,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -795,7 +857,12 @@ async fn handle_remove_loop(
     let _ = state.events.send(event);
 }
 
-async fn handle_set_crossfader_position(request_id: String, position: f64, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_set_crossfader_position(
+    request_id: String,
+    position: f64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {
@@ -832,7 +899,12 @@ async fn handle_set_crossfader_position(request_id: String, position: f64, state
     let _ = state.events.send(event);
 }
 
-async fn handle_set_crossfader_curve(request_id: String, shape: f64, state: &Arc<AppState>, connection_id: Uuid) {
+async fn handle_set_crossfader_curve(
+    request_id: String,
+    shape: f64,
+    state: &Arc<AppState>,
+    connection_id: Uuid,
+) {
     {
         let mut seen = state.seen_requests.lock().await;
         if seen.check_and_record(&request_id) {

@@ -285,9 +285,18 @@ impl DeckState {
     /// revision is how clients tell "already applied" from "new".
     pub fn set_loop(&mut self, start_us: u64, end_us: u64) -> (CuePointEventData, LoopEventData) {
         let cue_event = self.set_cue_point(start_us);
-        self.loop_region = Some(LoopRegion { start_us, end_us, active: true });
+        self.loop_region = Some(LoopRegion {
+            start_us,
+            end_us,
+            active: true,
+        });
         self.revision += 1;
-        let loop_event = LoopEventData { start_us, end_us, active: true, revision: self.revision };
+        let loop_event = LoopEventData {
+            start_us,
+            end_us,
+            active: true,
+            revision: self.revision,
+        };
         (cue_event, loop_event)
     }
 
@@ -298,7 +307,12 @@ impl DeckState {
         loop_region.active = active;
         let (start_us, end_us) = (loop_region.start_us, loop_region.end_us);
         self.revision += 1;
-        Some(LoopEventData { start_us, end_us, active, revision: self.revision })
+        Some(LoopEventData {
+            start_us,
+            end_us,
+            active,
+            revision: self.revision,
+        })
     }
 
     /// Removes the loop region entirely, unlike `set_loop_active` which only
@@ -346,7 +360,11 @@ impl DeckState {
 
     /// Schedules a pause transition `lead_time_us` in the future. Playback
     /// continues until the effective time, then the anchor freezes there.
-    pub fn schedule_pause(&mut self, now_us: ServerTimeUs, lead_time_us: u64) -> TransportEventData {
+    pub fn schedule_pause(
+        &mut self,
+        now_us: ServerTimeUs,
+        lead_time_us: u64,
+    ) -> TransportEventData {
         let effective_time_us = now_us + lead_time_us;
         let position_us = self.position_at_with_loop(effective_time_us);
 
@@ -369,7 +387,11 @@ impl DeckState {
     /// to the beginning of the track without changing whether it's playing
     /// or paused. Mirrors `schedule_pause`'s convention of committing the
     /// post-transition anchor immediately rather than tracking a pending one.
-    pub fn schedule_restart(&mut self, now_us: ServerTimeUs, lead_time_us: u64) -> TransportEventData {
+    pub fn schedule_restart(
+        &mut self,
+        now_us: ServerTimeUs,
+        lead_time_us: u64,
+    ) -> TransportEventData {
         let effective_time_us = now_us + lead_time_us;
 
         self.transport.anchor_position_us = 0;
@@ -392,7 +414,12 @@ impl DeckState {
     /// e.g. clicking/dragging a waveform. Like `schedule_restart`, always a
     /// fresh transition (no idempotent-by-value check): landing on the same
     /// position twice is still the intended effect, not a no-op.
-    pub fn schedule_seek(&mut self, now_us: ServerTimeUs, lead_time_us: u64, position_us: u64) -> TransportEventData {
+    pub fn schedule_seek(
+        &mut self,
+        now_us: ServerTimeUs,
+        lead_time_us: u64,
+        position_us: u64,
+    ) -> TransportEventData {
         let effective_time_us = now_us + lead_time_us;
 
         self.transport.anchor_position_us = position_us;
@@ -415,7 +442,11 @@ impl DeckState {
     /// `schedule_seek`, callers never supply one. If no cue point has been
     /// set yet, this is a no-op (idempotent_replay) rather than a panic,
     /// since there's nothing sensible to release to.
-    pub fn schedule_cue_release(&mut self, now_us: ServerTimeUs, lead_time_us: u64) -> TransportEventData {
+    pub fn schedule_cue_release(
+        &mut self,
+        now_us: ServerTimeUs,
+        lead_time_us: u64,
+    ) -> TransportEventData {
         let Some(cue_position_us) = self.cue_point_us else {
             return TransportEventData {
                 action: TransportAction::CueRelease,
@@ -556,7 +587,10 @@ impl RoomState {
     pub fn set_crossfader_position(&mut self, position: f64) -> CrossfaderEventData {
         self.crossfader_position = position;
         self.crossfader_revision += 1;
-        CrossfaderEventData { value: position, revision: self.crossfader_revision }
+        CrossfaderEventData {
+            value: position,
+            revision: self.crossfader_revision,
+        }
     }
 
     /// Sets the crossfader curve shape. Same conventions as
@@ -567,7 +601,10 @@ impl RoomState {
     pub fn set_crossfader_curve_shape(&mut self, shape: f64) -> CrossfaderEventData {
         self.crossfader_curve_shape = shape;
         self.crossfader_revision += 1;
-        CrossfaderEventData { value: shape, revision: self.crossfader_revision }
+        CrossfaderEventData {
+            value: shape,
+            revision: self.crossfader_revision,
+        }
     }
 }
 
@@ -698,7 +735,10 @@ mod tests {
     fn current_position_matches_transport_position() {
         let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
-        assert_eq!(room.current_position(1_150_000), room.transport.position_at(1_150_000));
+        assert_eq!(
+            room.current_position(1_150_000),
+            room.transport.position_at(1_150_000)
+        );
     }
 
     #[test]
@@ -879,7 +919,14 @@ mod tests {
         assert_eq!(loop_event.start_us, 1_000_000);
         assert_eq!(loop_event.end_us, 3_000_000);
         assert!(loop_event.active);
-        assert_eq!(room.loop_region, Some(LoopRegion { start_us: 1_000_000, end_us: 3_000_000, active: true }));
+        assert_eq!(
+            room.loop_region,
+            Some(LoopRegion {
+                start_us: 1_000_000,
+                end_us: 3_000_000,
+                active: true
+            })
+        );
         // Two fresh revisions: one for the cue point, one for the loop.
         assert_eq!(cue_event.revision, revision_before + 1);
         assert_eq!(loop_event.revision, revision_before + 2);
@@ -893,7 +940,14 @@ mod tests {
 
         room.set_loop(5_000_000, 9_000_000);
 
-        assert_eq!(room.loop_region, Some(LoopRegion { start_us: 5_000_000, end_us: 9_000_000, active: true }));
+        assert_eq!(
+            room.loop_region,
+            Some(LoopRegion {
+                start_us: 5_000_000,
+                end_us: 9_000_000,
+                active: true
+            })
+        );
         assert_eq!(room.cue_point_us, Some(5_000_000));
     }
 

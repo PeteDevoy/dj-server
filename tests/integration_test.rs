@@ -19,7 +19,8 @@ async fn spawn_server() -> String {
     format!("ws://{addr}/ws")
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn recv_json(ws: &mut WsStream) -> Value {
     loop {
@@ -83,7 +84,10 @@ async fn two_clients_observe_the_same_canonical_transport_events() {
 
     assert_eq!(play_a["event_id"], play_b["event_id"]);
     assert_eq!(play_a["deck"], "a");
-    assert_eq!(play_a["effective_server_time_us"], play_b["effective_server_time_us"]);
+    assert_eq!(
+        play_a["effective_server_time_us"],
+        play_b["effective_server_time_us"]
+    );
     assert_eq!(play_a["revision"], play_b["revision"]);
     assert_eq!(play_a["revision"], 1);
     assert_eq!(play_a["action"], "play");
@@ -161,7 +165,10 @@ async fn deck_a_and_deck_b_are_fully_independent() {
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot["deck_a"]["revision"], 2);
     assert_eq!(snapshot["deck_a"]["transport"]["playing"], true);
-    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000);
+    assert_eq!(
+        snapshot["deck_a"]["transport"]["anchor_position_us"],
+        4_500_000
+    );
     assert_eq!(snapshot["deck_b"]["revision"], 0);
     assert_eq!(snapshot["deck_b"]["transport"]["playing"], false);
     assert_eq!(snapshot["deck_b"]["transport"]["anchor_position_us"], 0);
@@ -183,7 +190,10 @@ async fn deck_a_and_deck_b_are_fully_independent() {
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot["deck_a"]["revision"], 2); // unchanged
-    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000); // unchanged
+    assert_eq!(
+        snapshot["deck_a"]["transport"]["anchor_position_us"],
+        4_500_000
+    ); // unchanged
     assert_eq!(snapshot["deck_b"]["revision"], 1);
     assert_eq!(snapshot["deck_b"]["transport"]["playing"], true);
 }
@@ -205,7 +215,10 @@ async fn clock_request_round_trips_the_opaque_client_timestamp() {
     let response = recv_until(&mut client, "clock_response").await;
     assert_eq!(response["request_id"], "clock-42");
     assert_eq!(response["client_send_time_ms"], 9382.45);
-    assert!(response["server_receive_time_us"].as_u64().unwrap() <= response["server_send_time_us"].as_u64().unwrap());
+    assert!(
+        response["server_receive_time_us"].as_u64().unwrap()
+            <= response["server_send_time_us"].as_u64().unwrap()
+    );
 }
 
 #[tokio::test]
@@ -216,7 +229,8 @@ async fn duplicate_request_id_is_not_applied_twice() {
     let _welcome = recv_until(&mut client, "welcome").await;
     let _snapshot = recv_until(&mut client, "state_snapshot").await;
 
-    let play_request = json!({"type": "transport_request", "request_id": "dup-1", "deck": "a", "action": "play"});
+    let play_request =
+        json!({"type": "transport_request", "request_id": "dup-1", "deck": "a", "action": "play"});
     send_json(&mut client, play_request.clone()).await;
     let first = recv_until(&mut client, "transport_event").await;
     assert_eq!(first["revision"], 1);
@@ -318,7 +332,10 @@ async fn seek_jumps_to_target_position_and_broadcasts_to_both_clients() {
     .await;
     let snapshot = recv_until(&mut client_a, "state_snapshot").await;
     assert_eq!(snapshot["deck_a"]["transport"]["playing"], true);
-    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 4_500_000);
+    assert_eq!(
+        snapshot["deck_a"]["transport"]["anchor_position_us"],
+        4_500_000
+    );
 }
 
 #[tokio::test]
@@ -383,7 +400,10 @@ async fn cue_point_set_and_released_syncs_to_both_clients() {
     .await;
     let snapshot = recv_until(&mut client_b, "state_snapshot").await;
     assert_eq!(snapshot["deck_a"]["transport"]["playing"], false);
-    assert_eq!(snapshot["deck_a"]["transport"]["anchor_position_us"], 6_000_000);
+    assert_eq!(
+        snapshot["deck_a"]["transport"]["anchor_position_us"],
+        6_000_000
+    );
 }
 
 #[tokio::test]
