@@ -1,0 +1,139 @@
+name: CI and deploy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.86.0
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Package release
+        run: |
+          rm -rf package
+          mkdir package
+          cp target/release/shared-audio-clock package/
+          cp -R public package/public
+          tar -C package -czf shared-audio-clock.tar.gz .
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dj-server-release
+          path: shared-audio-clock.tar.gz
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    environment: production
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dj-server-release
+
+      - name: Load SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+
+      - name: Configure SSH host verification
+        env:
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload release
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          RELEASE_ID: ${{ github.sha }}
+        run: |
+          archive="dj-server-${RELEASE_ID}.tar.gz"
+          cp shared-audio-clock.tar.gz "$archive"
+
+          scp -P "$VPS_PORT" \
+            -o StrictHostKeyChecking=yes \
+            "$archive" \
+            "$VPS_USER@$VPS_HOST:/tmp/$archive"
+
+      - name: Install and restart service
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          RELEASE_ID: ${{ github.sha }}
+        run: |
+          archive="dj-server-${RELEASE_ID}.tar.gz"
+
+          ssh -p "$VPS_PORT" \
+            -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "bash -s -- '$RELEASE_ID' '$archive'" <<'REMOTE'
+          set -euo pipefail
+
+          release_id="$1"
+          archive_name="$2"
+          base="/opt/dj-server"
+          archive="/tmp/$archive_name"
+
+          mkdir -p "$base/releases"
+          tmp="$(mktemp -d "$base/.incoming.XXXXXX")"
+          trap 'rm -rf "$tmp" "$archive"' EXIT
+
+          tar -xzf "$archive" -C "$tmp"
+          test -x "$tmp/shared-audio-clock"
+          test -d "$tmp/public"
+
+          if [ -e "$base/releases/$release_id" ]; then
+            rm -rf "$base/releases/$release_id"
+          fi
+
+          mv "$tmp" "$base/releases/$release_id"
+
+          previous="$(readlink "$base/current" 2>/dev/null || true)"
+          ln -sfn "$base/releases/$release_id" "$base/current"
+
+          if ! sudo /usr/bin/systemctl restart dj-server.service; then
+            if [ -n "$previous" ]; then
+              ln -sfn "$previous" "$base/current"
+              sudo /usr/bin/systemctl restart dj-server.service || true
+            fi
+            exit 1
+          fi
+
+          sudo /usr/bin/systemctl is-active dj-server.service
+          REMOTE
