@@ -127,13 +127,13 @@ jobs:
           previous="$(readlink "$base/current" 2>/dev/null || true)"
           ln -sfn "$base/releases/$release_id" "$base/current"
 
-          if ! sudo /usr/bin/systemctl restart dj-server.service; then
+          if ! sudo /bin/systemctl restart dj-server.service; then
             if [ -n "$previous" ]; then
               ln -sfn "$previous" "$base/current"
-              sudo /usr/bin/systemctl restart dj-server.service || true
+              sudo /bin/systemctl restart dj-server.service || true
             fi
             exit 1
           fi
 
-          sudo /usr/bin/systemctl is-active dj-server.service
+          sudo /bin/systemctl is-active dj-server.service
           REMOTE
