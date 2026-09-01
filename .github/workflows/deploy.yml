@@ -26,6 +26,12 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -33,13 +39,13 @@ jobs:
         run: cargo test --locked
 
       - name: Build release binary
-        run: cargo build --locked --release
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
 
       - name: Package release
         run: |
           rm -rf package
           mkdir package
-          cp target/release/shared-audio-clock package/
+          cp target/x86_64-unknown-linux-musl/release/shared-audio-clock package/
           cp -R public package/public
           tar -C package -czf shared-audio-clock.tar.gz .
 

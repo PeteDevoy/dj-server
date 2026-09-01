@@ -66,4 +66,4 @@ cargo test --locked
 cargo build --locked --release
 ```
 
-The release executable is `target/release/shared-audio-clock`. Deploy it together with the `public/` directory, since the server serves those files at runtime.
+The local release executable is `target/release/shared-audio-clock`. The deployment workflow builds a stripped, statically linked x86-64 musl executable at `target/x86_64-unknown-linux-musl/release/shared-audio-clock`. Deploy either executable together with the `public/` directory, since the server serves those files at runtime.
