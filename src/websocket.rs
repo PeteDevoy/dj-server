@@ -755,6 +755,8 @@ async fn handle_set_loop(
         start_us: loop_event.start_us,
         end_us: loop_event.end_us,
         active: loop_event.active,
+        effective_server_time_us: loop_event.effective_server_time_us,
+        position_us: loop_event.position_us,
     });
 }
 
@@ -775,7 +777,8 @@ async fn handle_set_loop_active(
 
     let event_data = {
         let mut room = state.room.lock().await;
-        room.deck_mut(deck).set_loop_active(active)
+        room.deck_mut(deck)
+            .set_loop_active(active, state.clock.now_us())
     };
 
     let Some(event_data) = event_data else {
@@ -805,6 +808,8 @@ async fn handle_set_loop_active(
         start_us: event_data.start_us,
         end_us: event_data.end_us,
         active: event_data.active,
+        effective_server_time_us: event_data.effective_server_time_us,
+        position_us: event_data.position_us,
     };
 
     let _ = state.events.send(event);

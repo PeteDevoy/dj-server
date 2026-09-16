@@ -86,12 +86,18 @@ pub struct LoopRegion {
 
 /// The outcome of inserting, overwriting, or toggling the room's single
 /// loop region, ready to be turned into `ServerMessage::LoopChanged`.
+///
+/// `position_us`/`effective_server_time_us` are the transport anchor as of
+/// this change (see `set_loop_active`'s doc comment for why toggling a
+/// loop's `active` flag needs to carry an anchor rebase along with it).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LoopEventData {
     pub start_us: u64,
     pub end_us: u64,
     pub active: bool,
     pub revision: u64,
+    pub position_us: u64,
+    pub effective_server_time_us: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -296,13 +302,32 @@ impl DeckState {
             end_us,
             active: true,
             revision: self.revision,
+            position_us: self.transport.anchor_position_us,
+            effective_server_time_us: self.transport.anchor_server_time_us,
         };
         (cue_event, loop_event)
     }
 
     /// Toggles the existing loop's active flag without changing its bounds.
     /// Returns `None` if no loop has been inserted yet - nothing to toggle.
-    pub fn set_loop_active(&mut self, active: bool) -> Option<LoopEventData> {
+    ///
+    /// Rebases the transport anchor to `position_at_with_loop(now_us)` -
+    /// i.e. the position implied by the OLD active flag - before flipping
+    /// it. Without this, deactivating a loop that's been wrapping for a
+    /// while jumps the position forward: `position_at_with_loop` stops
+    /// wrapping the instant `active` goes false, so it would otherwise
+    /// suddenly return the raw, never-wrapped elapsed position accumulated
+    /// across every already-played lap (e.g. a 3s loop played 10 times
+    /// leaves ~27s of that unaccounted for). Same "commit the current
+    /// position" convention as `schedule_pause`, but leaves `playing`
+    /// untouched - playback (if any) continues uninterrupted from the
+    /// rebased anchor instead of freezing.
+    pub fn set_loop_active(&mut self, active: bool, now_us: ServerTimeUs) -> Option<LoopEventData> {
+        self.loop_region?;
+        let position_us = self.position_at_with_loop(now_us);
+        self.transport.anchor_position_us = position_us;
+        self.transport.anchor_server_time_us = now_us;
+
         let loop_region = self.loop_region.as_mut()?;
         loop_region.active = active;
         let (start_us, end_us) = (loop_region.start_us, loop_region.end_us);
@@ -312,6 +337,8 @@ impl DeckState {
             end_us,
             active,
             revision: self.revision,
+            position_us,
+            effective_server_time_us: now_us,
         })
     }
 
@@ -957,13 +984,13 @@ mod tests {
         room.set_loop(1_000_000, 3_000_000);
         let revision_before = room.revision;
 
-        let event = room.set_loop_active(false).expect("loop exists");
+        let event = room.set_loop_active(false, 0).expect("loop exists");
 
         assert!(!event.active);
         assert!(!room.loop_region.unwrap().active);
         assert_eq!(room.revision, revision_before + 1);
 
-        let event = room.set_loop_active(true).expect("loop exists");
+        let event = room.set_loop_active(true, 0).expect("loop exists");
         assert!(event.active);
         assert!(room.loop_region.unwrap().active);
     }
@@ -971,7 +998,7 @@ mod tests {
     #[test]
     fn set_loop_active_with_no_loop_returns_none() {
         let mut room = DeckState::new();
-        assert_eq!(room.set_loop_active(true), None);
+        assert_eq!(room.set_loop_active(true, 0), None);
     }
 
     #[test]
@@ -1012,11 +1039,40 @@ mod tests {
         let mut room = DeckState::new();
         room.schedule_play(0, 150_000);
         room.set_loop(1_000_000, 3_000_000);
-        room.set_loop_active(false);
+        room.set_loop_active(false, 150_000); // deactivated right away, before any wrap ever happened
 
         let position = room.current_position(7_650_000);
 
         assert_eq!(position, 7_500_000); // raw, unwrapped - the loop is inert
+    }
+
+    #[test]
+    fn set_loop_active_false_rebases_anchor_to_avoid_a_jump() {
+        // Reproduces a reported bug: a 3s loop plays several times over, then
+        // gets deactivated mid-playback - the position immediately afterwards
+        // must continue from where the loop actually was, not jump forward
+        // by all the real time spent looping.
+        let mut room = DeckState::new();
+        room.schedule_play(0, 150_000); // anchor_position_us=0, anchor_server_time_us=150_000
+        room.set_loop(1_000_000, 4_000_000); // 3s loop starting at 1s
+
+        // 10 full laps of the 3s loop after reaching its start: raw elapsed
+        // position is 1s + 10*3s = 31s, which wraps to 1s (the loop's start).
+        let now_us = 150_000 + 31_000_000;
+        assert_eq!(room.current_position(now_us), 1_000_000);
+
+        let event = room.set_loop_active(false, now_us).expect("loop exists");
+        assert!(!event.active);
+
+        // Deactivating must commit that same wrapped position as the new
+        // anchor - not the raw ~31s the naive formula would otherwise expose
+        // the instant `active` goes false.
+        assert_eq!(room.transport.anchor_position_us, 1_000_000);
+        assert_eq!(room.transport.anchor_server_time_us, now_us);
+
+        // Querying again right away (no time elapsed) must read back that
+        // same position, not jump ~30s ahead.
+        assert_eq!(room.current_position(now_us), 1_000_000);
     }
 
     #[test]

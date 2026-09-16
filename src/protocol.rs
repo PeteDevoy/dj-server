@@ -355,6 +355,15 @@ pub enum ServerMessage {
     /// / `SetLoopActive`). Shares that deck's revision counter, like
     /// `CuePointChanged`. Always describes a concrete loop (never absent) -
     /// this only ever fires when one exists to describe.
+    ///
+    /// `effective_server_time_us`/`position_us` carry the transport anchor
+    /// as rebased by this same change (see `DeckState::set_loop_active`) -
+    /// toggling `active` off mid-loop must move every client's anchor off
+    /// the wrapped position it was quietly standing in for, or each
+    /// client's own position formula jumps ahead the instant it stops
+    /// wrapping. Every client, including the originator, applies these
+    /// exactly like a `TransportEvent`'s, just without touching
+    /// `playing`/`playback_rate`.
     LoopChanged {
         event_id: Uuid,
         request_id: String,
@@ -364,6 +373,8 @@ pub enum ServerMessage {
         start_us: u64,
         end_us: u64,
         active: bool,
+        effective_server_time_us: u64,
+        position_us: u64,
     },
     /// Broadcast whenever a deck's loop region is removed entirely (see
     /// `ClientMessage::RemoveLoop`) - unlike `LoopChanged`, this describes an
@@ -588,6 +599,8 @@ mod tests {
             start_us: 6_000_000,
             end_us: 13_500_000,
             active: true,
+            effective_server_time_us: 48_200_000,
+            position_us: 6_000_000,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(json["type"], "loop_changed");
@@ -596,6 +609,8 @@ mod tests {
         assert_eq!(json["end_us"], 13_500_000);
         assert_eq!(json["active"], true);
         assert_eq!(json["revision"], 4);
+        assert_eq!(json["effective_server_time_us"], 48_200_000);
+        assert_eq!(json["position_us"], 6_000_000);
     }
 
     #[test]

@@ -1502,6 +1502,16 @@ function createDeck(deckId) {
       return;
     }
     lastAppliedRevision = msg.revision;
+    // Rebases the transport anchor to match the server's (see
+    // DeckState::set_loop_active's doc comment): toggling `active` off
+    // mid-loop changes what currentModelPositionUs formula returns from this
+    // point on (it stops wrapping), so without this the model position jumps
+    // ahead by however long playback spent wrapping, and the "drift" this
+    // manufactures against the actually-unmoved audio position (tick(),
+    // below) would also send the nudge/drift-calibration system chasing a
+    // discrepancy that was never real. Never touches playing/playback_rate -
+    // those aren't part of what this event describes.
+    transport = { ...transport, anchor_position_us: msg.position_us, anchor_server_time_us: msg.effective_server_time_us };
     loopRegion = { start_us: msg.start_us, end_us: msg.end_us, active: msg.active };
     window.renderRegions?.(deckId, { cuePointUs, loopRegion });
     updateReloopButtonUi();
