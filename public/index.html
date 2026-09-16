@@ -23,6 +23,12 @@
   .paused { color: #a22; }
   input[type="range"] { display: block; width: 100%; margin-top: 0.3rem; }
   .waveform { margin: 0.5rem 0 1rem; cursor: pointer; }
+  /* wavesurfer.js's own cursor and the regions plugin's region overlay both sit at
+     z-index 5 inside its shadow root, and the region overlay is mounted after the
+     cursor - so an active loop's amber fill (rgba(255, 191, 0, 0.8), see
+     waveform.js) paints over the playhead, leaving only ~20% of it visible.
+     Raise the cursor above it via its exposed shadow part. */
+  .waveform > div::part(cursor) { z-index: 6 !important; }
   .decks { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
   .control-row { display: flex; gap: 1rem; align-items: stretch; flex-wrap: wrap; }
   .control-box { flex: 1 1 0; min-width: 300px; }
