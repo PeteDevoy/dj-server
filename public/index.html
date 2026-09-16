@@ -718,6 +718,17 @@ function crossfaderGainForDeck(deckId) {
   return window.crossfaderGain(x, crossfaderCurveShape);
 }
 
+// Loaded automatically onto each deck on page open (see loadAudioFile's call
+// site below) so a visitor can hear the sync in action immediately, without
+// needing to source matching audio files for both devices themselves. Both
+// tracks are licensed under the Creative Commons Attribution-Share Alike 3.0
+// Unported license - see public/demo_tracks/CREDITS.md for the full
+// attribution text (also documented in README.md's Demo tracks section).
+const DEMO_TRACKS = {
+  a: { url: "demo_tracks/André_Michelle_-_Construct_Infinity.ogg", displayName: "André Michelle - Construct Infinity.ogg" },
+  b: { url: "demo_tracks/Cripta_-_Beer.ogg", displayName: "Cripta - Beer.ogg" },
+};
+
 // ---- one independent DJ deck -----------------------------------------------
 //
 // Everything below is per-deck state: its own audio graph (source, pitch
@@ -1748,6 +1759,26 @@ function createDeck(deckId) {
       if (!file) return;
       loadAudioFile(file);
     });
+  }
+
+  // Auto-load this deck's demo track on page open, through the same
+  // loadAudioFile path a manual pick or drop uses (so waveform/BPM/file
+  // status all populate normally) - fetch+decode needs no user gesture,
+  // only source.start() does, so this is safe to do unprompted. Never
+  // auto-plays. Fetched via the underscore-only filename to sidestep URL
+  // encoding, but re-labelled with its real display name so the UI and
+  // logs show the track's actual title.
+  {
+    const demoTrack = DEMO_TRACKS[deckId];
+    if (demoTrack) {
+      fetch(demoTrack.url)
+        .then((res) => {
+          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+          return res.blob();
+        })
+        .then((blob) => loadAudioFile(new File([blob], demoTrack.displayName, { type: blob.type })))
+        .catch((err) => log(`failed to auto-load demo track "${demoTrack.displayName}": ${err.message ?? err}`));
+    }
   }
 
   /// Flashes the Play/Pause button's text red for ~2s - the visible "why

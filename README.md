@@ -2,7 +2,7 @@
 
 A Rust/Axum web application for synchronizing two browser-based DJ decks across a shared room. It serves the frontend from `public/` and exposes a WebSocket endpoint at `/ws`.
 
-File transfer between clients is not yet supported; each client needs to load the same audio files independently.
+File transfer between clients is not yet supported; each client needs to load the same audio files independently. Deck A and Deck B each auto-load a bundled demo track on open so the sync is audible immediately - see [Demo tracks](#demo-tracks) below for licensing.
 
 ## Principles of operation
 
@@ -58,6 +58,15 @@ The server reads these environment variables:
 | `SCHEDULE_LEAD_TIME_MS` | `150` | Scheduling lead time in milliseconds; must be greater than zero |
 | `TLS_ENABLED` | `false` | Enables auto-generated self-signed HTTPS |
 | `TLS_CERT_DIR` | `certs` | Directory for the generated certificate and key |
+
+## Demo tracks
+
+Deck A and Deck B each auto-load one of the two tracks in `public/demo_tracks/` when the app opens (see `DEMO_TRACKS` in `public/index.html`), so opening the page is enough to hear the sync without sourcing matching audio files yourself.
+
+- **André Michelle - Construct Infinity.ogg**: This file is licensed under the Creative Commons Attribution-Share Alike 3.0 Unported license.
+- **Cripta - Beer.ogg**: This file is licensed under the Creative Commons Attribution-Share Alike 3.0 Unported license.
+
+See `public/demo_tracks/CREDITS.md` for the same attribution served alongside the files.
 
 ## Test and build
 
