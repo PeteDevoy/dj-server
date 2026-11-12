@@ -1,5 +1,9 @@
 # DJ Server
 
+[Demo](https://dj.bakun.in/) -- open on two devices and wait some seconds for the demo songs to load.
+
+---
+
 A Rust/Axum web application for synchronizing two browser-based DJ decks across a shared room. It serves the frontend from `public/` and exposes a WebSocket endpoint at `/ws`.
 
 File transfer between clients is not yet supported; each client needs to load the same audio files independently. Deck A and Deck B each auto-load a bundled demo track on open so the sync is audible immediately - see [Demo tracks](#demo-tracks) below for licensing.
